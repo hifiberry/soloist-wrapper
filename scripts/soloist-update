@@ -71,7 +71,13 @@ else
   fi
 fi
 
-AGE_DAYS=$(( ( $(date +%s) - BUILD_EPOCH ) / 86400 ))
+NOW_EPOCH=$(date +%s)
+if [ "$BUILD_EPOCH" -gt "$NOW_EPOCH" ]; then
+  echo "build_date '$BUILD_DATE' is in the future (clock skew or corrupt version.json); updating to be safe"
+  exec /usr/bin/soloist-fetch
+fi
+
+AGE_DAYS=$(( ( NOW_EPOCH - BUILD_EPOCH ) / 86400 ))
 echo "Installed build is ${AGE_DAYS} days old (build_date_source: ${BUILD_DATE_SOURCE:-<unset>})"
 
 if [ "$AGE_DAYS" -ge "$MAX_AGE_DAYS" ]; then
