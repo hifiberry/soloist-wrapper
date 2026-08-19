@@ -1,0 +1,15 @@
+[Unit]
+Description=Spotify Soloist (Spotify Connect player)
+After=sound.target network.target pipewire.service
+Wants=avahi-daemon.service soloist-bridge.service
+# Only one Spotify Connect endpoint may be advertised at a time.
+Conflicts=librespot.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/start-soloist
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

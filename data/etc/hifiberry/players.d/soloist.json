@@ -1,0 +1,17 @@
+{
+    "name": "Spotify (Soloist)",
+    "provided_by": "soloist",
+    "systemd_service": "soloist",
+    "icon": "soloist",
+    "allow_change": true,
+    "maintainer_name": "HiFiBerry",
+    "maintainer_url": "https://www.hifiberry.com",
+    "settings": [
+        {
+            "key": "api_key",
+            "type": "secret",
+            "label": "Soloist API key",
+            "default": ""
+        }
+    ]
+}

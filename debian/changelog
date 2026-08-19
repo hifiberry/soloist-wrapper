@@ -1,0 +1,12 @@
+hifiberry-soloist-wrapper (0.1.0) trixie; urgency=medium
+
+  * Initial release: package skeleton registering Spotify Soloist as an
+    external Spotify Connect player.
+    - ACR player descriptor and WebUI player card (Players page)
+    - config-server permission drop-in for the soloist/soloist-bridge
+      systemd units
+    - user unit for the soloist service
+    - ships drop-ins only -- Spotify's Soloist binary may not be
+      redistributed and is fetched at runtime by a later package version
+
+ -- HiFiBerry <support@hifiberry.com>  Wed, 19 Aug 2026 12:00:00 +0000

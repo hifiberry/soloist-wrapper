@@ -1,0 +1,13 @@
+#!/bin/sh
+set -e
+#DEBHELPER#
+
+# config-server caches the conf.d systemd-permission drop-ins at startup, so a
+# package installed onto a running system is invisible to it until it re-reads
+# conf.d -- the WebUI would 401/404 on every attempt to start the player. No-op
+# during image builds, where config-server is not running yet.
+if [ -d /run/systemd/system ] && systemctl is-active --quiet config-server 2>/dev/null; then
+    systemctl restart config-server >/dev/null 2>&1 || true
+fi
+
+exit 0
