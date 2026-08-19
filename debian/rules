@@ -11,3 +11,4 @@ override_dh_auto_test:
 override_dh_auto_install:
 	mkdir -p debian/hifiberry-soloist-wrapper
 	cp -r data/* debian/hifiberry-soloist-wrapper/
+	install -D -m0755 scripts/soloist-fetch debian/hifiberry-soloist-wrapper/usr/bin/soloist-fetch
