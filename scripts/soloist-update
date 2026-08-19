@@ -61,6 +61,13 @@ MAX_AGE_DAYS_FALLBACK=30
 # build silently sails past 90 days with no updater ever running again.
 if [ ! -x "$SOLOIST_BIN" ]; then
   echo "No soloist binary at ${SOLOIST_BIN}; nothing installed yet, not updating"
+  # If the expiry flag is somehow set with no binary in place (e.g. the
+  # binary was removed out from under an otherwise-expired install), it is
+  # now stale: there is nothing left to expire. Leaving it would make
+  # soloist-update.path re-trigger on every run without ever clearing it,
+  # until its TriggerLimitBurst parks the path unit in a permanently failed
+  # state -- a dead end this cheap check avoids.
+  rm -f "${DATA_DIR}/expired"
   exit 0
 fi
 

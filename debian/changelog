@@ -1,12 +1,24 @@
 hifiberry-soloist-wrapper (0.1.0) trixie; urgency=medium
 
-  * Initial release: package skeleton registering Spotify Soloist as an
-    external Spotify Connect player.
+  * Initial release: registers Spotify Soloist as an external Spotify
+    Connect player. Spotify's Soloist binary may not be redistributed, so
+    this package never ships it -- it is downloaded from Spotify's CDN onto
+    the device itself, on the user's request, using their own API key.
+    - soloist-fetch downloads and installs the Soloist binary, verifies it
+      runs, and records its version/build date for expiry tracking
+    - start-soloist reads the user's API key from ConfigDB and launches
+      Soloist as a Spotify Connect endpoint (systemd --user soloist.service,
+      WebUI-toggleable, disabled by default; conflicts with librespot)
+    - soloist-update, plus soloist-update.timer (daily) and
+      soloist-update.path (expiry-flag-triggered), refresh the build before
+      Spotify's 90-day expiry
+    - soloist-bridge bridges Soloist's local WebSocket to audiocontrol for
+      metadata, artwork, queue and transport control, and serves the
+      WebUI's setup API (GET /status, POST /install) on 127.0.0.1:3549
     - ACR player descriptor and WebUI player card (Players page)
+    - nginx drop-in proxying /api/soloist/status and /api/soloist/install,
+      and the matching auth-gateway tier manifest
     - config-server permission drop-in for the soloist/soloist-bridge
       systemd units
-    - user unit for the soloist service
-    - ships drop-ins only -- Spotify's Soloist binary may not be
-      redistributed and is fetched at runtime by a later package version
 
  -- HiFiBerry <support@hifiberry.com>  Wed, 19 Aug 2026 12:00:00 +0000

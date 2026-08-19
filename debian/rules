@@ -45,18 +45,24 @@ override_dh_auto_install:
 #    only spawns soloist-update, which exits 0 with nothing to refresh if
 #    there is no version.json (see scripts/soloist-update), and the path
 #    unit only fires on an expiry flag that only start-soloist ever writes.
-#  - soloist-update.service and soloist-bridge.service are both left off
-#    this list deliberately: neither carries an [Install] section, so
-#    dh_installsystemduser has nothing to enable for either way. Their file
-#    is still installed (via the cp -r data/* above; dh_installsystemduser
-#    here only manages enable symlinks, not the copy). soloist-update.service
-#    is only ever pulled in as a Unit= target by the path unit or invoked
-#    directly. soloist-bridge.service is pulled in as a runtime dependency of
-#    soloist.service (Wants=soloist-bridge.service there) and stopped by its
-#    own PartOf=soloist.service -- giving it its own WantedBy=default.target
-#    would start its reconnect-backoff loop on every boot even when the user
-#    has never enabled Soloist, since soloist.service itself ships
-#    --no-enable.
+#  - soloist-bridge.service ALSO stays enabled, unlike an earlier revision
+#    of this package. It is the only server for GET /api/soloist/status and
+#    POST /api/soloist/install, and those must work even before the user has
+#    ever enabled Soloist itself -- that is the WebUI's very first state,
+#    "Installed, no binary -> Download Soloist from Spotify". Leaving it
+#    off this list (relying solely on soloist.service's
+#    Wants=soloist-bridge.service to start it) meant nothing ever listened
+#    on 127.0.0.1:3549 until the player was started once, which the
+#    Conflicts=librespot.service on soloist.service makes actively harmful
+#    to try as a workaround. See soloist-bridge.service's own [Install]
+#    comment for the full reasoning, including why its boot-time idle cost
+#    on a device that never enables Soloist is negligible next to that.
+#  - soloist-update.service is the only one left off this list: it carries
+#    no [Install] section, so dh_installsystemduser has nothing to enable.
+#    Its file is still installed (via the cp -r data/* above;
+#    dh_installsystemduser here only manages enable symlinks, not the copy).
+#    It is only ever pulled in as a Unit= target by the path unit or invoked
+#    directly.
 override_dh_installsystemduser:
-	dh_installsystemduser soloist-update.path soloist-update.timer
+	dh_installsystemduser soloist-update.path soloist-update.timer soloist-bridge.service
 	dh_installsystemduser --no-enable soloist.service

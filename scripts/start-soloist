@@ -3,7 +3,12 @@
 #
 # The API key lives only in ConfigDB, encrypted. It is read here into a shell
 # variable and handed straight to the daemon; it is never written to disk by
-# us.
+# us. curl's body is captured straight into a shell variable via command
+# substitution (-w '\n%{http_code}' appended so the HTTP status can still be
+# split from the body afterwards) -- no temp file ever holds it, and a bash
+# here-string (<<<) is avoided too since bash may back one with a real temp
+# file under some configurations, which would reintroduce the same problem
+# in a way that is not obvious from reading this script.
 #
 # PipeWire routing: deliberately no --pipewire-device. Measured on real
 # hardware (2026-08-19 spike): the default sink is already
@@ -71,41 +76,63 @@ fi
 # config-server hiccuping. This call is direct loopback to config-server's
 # own port (127.0.0.1:1081), not through the nginx auth gateway, so a
 # spurious 401/403 is not a realistic case here and isn't special-cased.
-BODY_FILE=$(mktemp) || BODY_FILE=""
+#
+# "Unreachable" gets one more twist: config-server is itself
+# After=network-online.target, and on a device with slow DHCP/Wi-Fi it can
+# still be starting up when this runs at boot. Unlike a slow response,
+# connection-refused/connect-failure returns from curl almost instantly, so
+# five RestartSec=2 attempts exhaust StartLimitBurst=5 inside the default
+# StartLimitIntervalSec=10s and land soloist.service permanently failed for
+# the rest of the boot -- with librespot already stopped by Conflicts=. A
+# user unit cannot order itself against a system unit's actual readiness
+# (only After=, which does not bound how long that takes), so the
+# unreachable case is retried HERE, inside this one invocation, for up to
+# 60s before giving up -- by which point it is a real, ongoing problem, not
+# a boot race, and letting systemd's own restart loop take over is
+# meaningful again. The 404/500/parse-error branches below are not part of
+# this retry: config-server having actually answered means it is up, so
+# there is no boot race left to wait out for those.
 ERR_FILE=$(mktemp) || ERR_FILE=""
-if [ -z "$BODY_FILE" ] || [ -z "$ERR_FILE" ]; then
-  echo "Could not create a temp file to hold config-server's response" >&2
-  rm -f "$BODY_FILE" "$ERR_FILE"
+if [ -z "$ERR_FILE" ]; then
+  echo "Could not create a temp file to hold config-server's curl error output" >&2
   exit 1
 fi
 
-# --show-error (mirroring soloist-fetch) puts curl's own error text in
-# ERR_FILE so a transport failure names the real cause instead of leaving
-# just an empty body. -o/-w separate the response body from its HTTP status
-# so the branches below can key off the real status code rather than curl's
-# collapsed --fail/exit-22 shorthand.
-HTTP_STATUS=$(curl --silent --show-error --max-time 5 \
-  -o "$BODY_FILE" -w '%{http_code}' \
-  "${CONFIG_SERVER}/api/v1/key/player.soloist.api_key/secure" 2>"$ERR_FILE")
-CURL_STATUS=$?
-CURL_ERR=$(cat "$ERR_FILE")
+RETRY_DEADLINE=$(( $(date +%s) + 60 ))
+while :; do
+  # -w '\n%{http_code}' appends the HTTP status after a newline so it can be
+  # split from the body below; command substitution keeps the whole response
+  # in RESP, in memory, never on disk. --show-error puts curl's own error
+  # text in ERR_FILE so a transport failure names the real cause instead of
+  # leaving just an empty body.
+  RESP=$(curl --silent --show-error --max-time 5 -w '\n%{http_code}' \
+    "${CONFIG_SERVER}/api/v1/key/player.soloist.api_key/secure" 2>"$ERR_FILE")
+  CURL_STATUS=$?
+  [ "$CURL_STATUS" -eq 0 ] && break
+  CURL_ERR=$(cat "$ERR_FILE" 2>/dev/null)
+  if [ "$(date +%s)" -ge "$RETRY_DEADLINE" ]; then
+    break
+  fi
+  echo "Could not reach config-server for the API key yet (curl exit ${CURL_STATUS}): ${CURL_ERR}; retrying for up to 60s in case it is still starting" >&2
+  sleep 2
+done
 rm -f "$ERR_FILE"
 
 if [ "$CURL_STATUS" -ne 0 ]; then
-  rm -f "$BODY_FILE"
-  echo "Could not reach config-server for the API key (curl exit ${CURL_STATUS}): ${CURL_ERR}" >&2
+  echo "Could not reach config-server for the API key after retrying for 60s (curl exit ${CURL_STATUS}): ${CURL_ERR:-}" >&2
   exit 1
 fi
 
+HTTP_STATUS=${RESP##*$'\n'}
+BODY=${RESP%$'\n'*}
+
 if [ "$HTTP_STATUS" = "404" ]; then
-  rm -f "$BODY_FILE"
   echo "No Soloist API key configured. Enter one in the HiFiBerry web interface."
   exit 0
 fi
 
 if [ "$HTTP_STATUS" != "200" ]; then
-  BODY_SNIPPET=$(head -c 200 "$BODY_FILE" 2>/dev/null)
-  rm -f "$BODY_FILE"
+  BODY_SNIPPET=$(printf '%s' "$BODY" | head -c 200)
   echo "config-server returned HTTP ${HTTP_STATUS} for the API key (expected 200 or 404): ${BODY_SNIPPET}" >&2
   exit 1
 fi
@@ -116,7 +143,7 @@ fi
 # The former is genuinely unconfigured (exit 0, sit quiet); the latter is
 # unknown/transient (exit 1, let systemd retry) rather than misreporting it
 # as "not configured", which is exactly the assertion that misdirects.
-API_KEY=$(python3 -c '
+API_KEY=$(printf '%s' "$BODY" | python3 -c '
 import json, sys
 try:
     d = json.load(sys.stdin)
@@ -129,9 +156,8 @@ if value:
     print(value)
     sys.exit(0)
 sys.exit(2)
-' < "$BODY_FILE" 2>/dev/null)
+' 2>/dev/null)
 PARSE_STATUS=$?
-rm -f "$BODY_FILE"
 
 if [ "$PARSE_STATUS" -eq 2 ]; then
   echo "No Soloist API key configured. Enter one in the HiFiBerry web interface."

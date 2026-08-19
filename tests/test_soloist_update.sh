@@ -160,4 +160,44 @@ setup_expiry_flag() {
 }
 run_case "expiry flag present: update" "yes" setup_expiry_flag
 
+# 9. No binary AND a stale expiry flag (e.g. the binary was removed out from
+# under an otherwise-expired install) -> no update (nothing to update: this
+# is still the "nothing installed" case), but the now-meaningless flag must
+# be cleared. Left in place it would make soloist-update.path re-trigger on
+# every single run without ever clearing it, until TriggerLimitBurst parks
+# the path unit in a permanent failed state.
+setup_no_binary_stale_flag() {
+  mkdir -p "$CASE_HOME/.local/share/soloist"
+  touch "$CASE_HOME/.local/share/soloist/expired"
+}
+run_case_and_check_flag_cleared() {
+  local name="no binary, stale expiry flag: no update, flag cleared"
+  CASE_HOME=$(mktemp -d)
+  MOCK_MARKER="$CASE_HOME/.fetch-called"
+  export MOCK_MARKER
+  setup_no_binary_stale_flag
+
+  local status
+  HOME="$CASE_HOME" "$UNDER_TEST" >"$CASE_HOME/.output" 2>&1
+  status=$?
+
+  if [ "$status" -ne 0 ]; then
+    echo "FAIL - $name (soloist-update exited $status, expected 0; output follows)"
+    sed 's/^/       /' "$CASE_HOME/.output"
+    FAILURES=$((FAILURES + 1))
+  elif [ -f "$CASE_HOME/.fetch-called" ]; then
+    echo "FAIL - $name (fetch was called, expected no-op; output follows)"
+    sed 's/^/       /' "$CASE_HOME/.output"
+    FAILURES=$((FAILURES + 1))
+  elif [ -f "$CASE_HOME/.local/share/soloist/expired" ]; then
+    echo "FAIL - $name (stale expired flag was not cleared)"
+    FAILURES=$((FAILURES + 1))
+  else
+    echo "ok   - $name"
+  fi
+
+  rm -rf "$CASE_HOME"
+}
+run_case_and_check_flag_cleared
+
 exit $FAILURES

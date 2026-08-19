@@ -10,15 +10,31 @@ if [ -d /run/systemd/system ] && systemctl is-active --quiet config-server 2>/de
     systemctl restart config-server >/dev/null 2>&1 || true
 fi
 
-# soloist-update.timer and soloist-update.path already ship enabled (see
-# debian/rules' override_dh_installsystemduser), so the /usr/lib/systemd/user
-# symlinks are in place as soon as this package is unpacked -- no
-# "systemctl --user enable" needed here, that would just duplicate what
-# debhelper already did. What is missing on a package installed onto an
-# already-running system is a live user manager that has re-read the new
-# unit files and actually started the timer/path unit; without this block
-# that only happens at the user's next login/boot. Best effort: no user
-# session yet (fresh image build, user never logged in) is not an error.
+# Pick up the new /etc/nginx/hifiberry-api.d/soloist.nginx drop-in. Without
+# this, a package installed onto a running system leaves both
+# /api/soloist/status and /api/soloist/install unrouted until the next
+# reboot: they fall through to the WebUI's SPA catch-all, which answers
+# GET with a 200 of index.html (not even a clean error) and POST with 405.
+# Mirrors aes67's postinst (packages/aes67/src/debian/postinst), which ships
+# into the same /etc/nginx/hifiberry-api.d/ directory. No-op during image
+# builds, where nginx is not running yet.
+if [ -d /run/systemd/system ] && systemctl is-active --quiet nginx 2>/dev/null; then
+    systemctl reload nginx >/dev/null 2>&1 || true
+fi
+
+# soloist-update.timer, soloist-update.path and soloist-bridge.service
+# already ship enabled (see debian/rules' override_dh_installsystemduser),
+# so the /usr/lib/systemd/user symlinks are in place as soon as this
+# package is unpacked -- no "systemctl --user enable" needed here, that
+# would just duplicate what debhelper already did. What is missing on a
+# package installed onto an already-running system is a live user manager
+# that has re-read the new unit files and actually started them; without
+# this block that only happens at the user's next login/boot. Starting
+# soloist-bridge.service here matters more than it might look: it is the
+# only server for GET /api/soloist/status and POST /api/soloist/install, so
+# until it runs, the WebUI's Soloist card cannot even show its first
+# "Download Soloist from Spotify" state. Best effort: no user session yet
+# (fresh image build, user never logged in) is not an error.
 if [ -f /etc/hifiberry.user ] && [ -d /run/systemd/system ]; then
     HB_USER=$(grep -vE '^[[:space:]]*#|^[[:space:]]*$' /etc/hifiberry.user | head -1 | tr -d '[:space:]')
     if [ -n "$HB_USER" ] && getent passwd "$HB_USER" >/dev/null 2>&1; then
@@ -31,8 +47,8 @@ if [ -f /etc/hifiberry.user ] && [ -d /run/systemd/system ]; then
             fi
             if ! systemd-run --uid "$HB_UID" --setenv XDG_RUNTIME_DIR="/run/user/$HB_UID" \
                     --pipe --wait --quiet --collect \
-                    systemctl --user start soloist-update.timer soloist-update.path; then
-                echo "hifiberry-soloist-wrapper: could not start soloist-update.timer/soloist-update.path for $HB_USER; the 90-day expiry refresh will not be active until the next login or reboot" >&2
+                    systemctl --user start soloist-update.timer soloist-update.path soloist-bridge.service; then
+                echo "hifiberry-soloist-wrapper: could not start soloist-update.timer/soloist-update.path/soloist-bridge.service for $HB_USER; the 90-day expiry refresh and the WebUI's Soloist download/status card will not be active until the next login or reboot" >&2
             fi
         fi
     fi

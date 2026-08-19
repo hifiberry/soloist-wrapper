@@ -1,13 +1,19 @@
 [Unit]
 Description=Bridge between Spotify Soloist and audiocontrol
 After=soloist.service
-# Stops the bridge whenever soloist.service stops (including the stop half
-# of a restart). Starting is handled the other way around: soloist.service
-# itself carries Wants=soloist-bridge.service, so every (re)start of
-# soloist.service also (re)starts the bridge -- which is exactly what is
-# wanted, since the bridge must re-read ws.port on each connection attempt
-# anyway (Soloist's ephemeral WS port changes on every restart).
-PartOf=soloist.service
+# No PartOf=soloist.service: this unit is always-on (see [Install] below),
+# independent of whether soloist.service is ever started. It tracks
+# Soloist's on/off state itself -- _run_loop() re-reads ws.addr/ws.port on
+# every connection attempt (Soloist's ephemeral WS port changes on every
+# soloist.service restart) and reconnects with capped backoff, and when the
+# connection drops it posts state_changed: disconnected to audiocontrol
+# (see scripts/soloist-bridge:465-471, in _run_loop's finally: block) so ACR
+# never shows a stale state. There is nothing left for soloist.service's
+# start/stop lifecycle to drive here, and tying this unit's life to
+# soloist.service's would SIGTERM a still-running "Update now" fetch that
+# soloist-bridge itself launched as a child (see /install's subprocess.run)
+# the moment soloist-fetch restarts the player at the end of a successful
+# install.
 
 [Service]
 Type=simple
@@ -21,9 +27,18 @@ Restart=always
 # without exiting -- so restarting fast is the right default.
 RestartSec=2
 
-# No [Install] section, deliberately: soloist-bridge is never started on
-# its own boot-time trigger. It is pulled in exclusively as a dependency of
-# soloist.service (see the Wants= there), which itself ships --no-enable
-# and is only turned on from the WebUI. Giving this unit its own
-# WantedBy=default.target would start it -- and its reconnect-backoff loop
-# -- on every boot even on a device where Soloist has never been enabled.
+# This unit IS its own boot-time trigger, unlike soloist.service. It has to
+# be: it is the only server for GET /api/soloist/status and
+# POST /api/soloist/install (see scripts/soloist-bridge's module docstring),
+# and those must answer even before the user has ever enabled Soloist
+# itself (soloist.service ships --no-enable) -- that is precisely the
+# WebUI's very first state, "Installed, no binary -> Download Soloist from
+# Spotify". Without this [Install] section nothing listens on
+# 127.0.0.1:3549 on a freshly installed extension, nginx 502s both routes,
+# and the download button can never be reached. The idle cost of running
+# this on every boot, including devices that never enable Soloist, is two
+# read_text() calls roughly every 30s while nothing is connected
+# (_run_loop's capped backoff) -- negligible next to the package's core
+# install flow being unreachable without it.
+[Install]
+WantedBy=default.target

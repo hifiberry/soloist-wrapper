@@ -158,8 +158,23 @@ echo "Installed ${BIN_DIR}/soloist (${VERSION}, built ${BUILD_DATE})"
 # attempts a refresh -- see soloist-update's header comment for why.
 rm -f "${DATA_DIR}/expired"
 
-# Restart the daemon if it was already running, so the new build takes over.
-if systemctl --user is-active --quiet soloist 2>/dev/null; then
+# Restart the daemon so the new build takes over. Checking only is-active
+# misses the exact scenario this script exists for: a device off for months
+# boots, soloist exits 10 (expired), Restart=on-failure's RestartSec=2 burns
+# through StartLimitBurst=5 inside the default 10s window before this path
+# unit even fires, and by the time soloist-fetch runs the unit is FAILED,
+# not active. is-active alone would then rewrite version.json, clear the
+# expired flag, and leave the player dead with nothing left to ever restart
+# it: the flag is gone so the path unit won't fire again, and the daily
+# timer sees a fresh build and exits 0. So also restart when the unit is
+# enabled (only ever true once the user has turned Soloist on) and failed --
+# resetting the failure counter first, since systemctl --user restart on a
+# unit still inside its StartLimitInterval would itself be refused as
+# start-limit-hit.
+if systemctl --user is-active --quiet soloist 2>/dev/null \
+   || { systemctl --user is-enabled --quiet soloist 2>/dev/null \
+        && systemctl --user is-failed --quiet soloist 2>/dev/null; }; then
+  systemctl --user reset-failed soloist 2>/dev/null || true
   systemctl --user restart soloist || true
 fi
 
