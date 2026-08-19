@@ -53,13 +53,59 @@ if [ ! -x "$BIN" ]; then
   exit 0
 fi
 
-API_KEY=$(curl --fail --silent --max-time 5 \
-  "${CONFIG_SERVER}/api/v1/key/player.soloist.api_key/secure" \
-  | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["value"])' 2>/dev/null)
+# Two genuinely different failure modes hide behind "no key", and they need
+# different exits. config-server answering "no such key" (curl --fail turns
+# the 404 into exit 22) means the device is honestly unconfigured -- log the
+# WebUI message and exit 0 so an unconfigured device sits quiet rather than
+# restart-looping. config-server being unreachable (not up yet at boot,
+# crashed, timed out -- curl exit 6/7/28/anything else) is TRANSIENT, and
+# must exit NON-ZERO so soloist.service's Restart=on-failure actually
+# retries; exiting 0 here would leave the player silently and permanently
+# down after nothing worse than a boot-order race. --show-error (mirroring
+# soloist-fetch) puts curl's own error text into the same capture so the log
+# names the real failure instead of just an empty API_KEY.
+API_RESPONSE=$(curl --fail --silent --show-error --max-time 5 \
+  "${CONFIG_SERVER}/api/v1/key/player.soloist.api_key/secure" 2>&1)
+CURL_STATUS=$?
 
-if [ -z "${API_KEY:-}" ]; then
+if [ "$CURL_STATUS" -ne 0 ]; then
+  if [ "$CURL_STATUS" -eq 22 ]; then
+    echo "No Soloist API key configured. Enter one in the HiFiBerry web interface."
+    exit 0
+  fi
+  echo "Could not reach config-server for the API key (curl exit ${CURL_STATUS}): ${API_RESPONSE}" >&2
+  exit 1
+fi
+
+# config-server answered; still distinguish a well-formed "no value" (or a
+# JSON null, which json.load turns into Python None -- falsy, same as
+# missing or empty) from a response that is not even in the shape we expect.
+# The former is genuinely unconfigured (exit 0, sit quiet); the latter is
+# unknown/transient (exit 1, let systemd retry) rather than misreporting it
+# as "not configured", which is exactly the assertion that misdirects.
+API_KEY=$(printf '%s' "$API_RESPONSE" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    if not isinstance(d, dict) or d.get("status") != "success" or not isinstance(d.get("data"), dict):
+        sys.exit(1)
+    value = d["data"].get("value")
+except Exception:
+    sys.exit(1)
+if value:
+    print(value)
+    sys.exit(0)
+sys.exit(2)
+' 2>/dev/null)
+PARSE_STATUS=$?
+
+if [ "$PARSE_STATUS" -eq 2 ]; then
   echo "No Soloist API key configured. Enter one in the HiFiBerry web interface."
   exit 0
+fi
+if [ "$PARSE_STATUS" -ne 0 ] || [ -z "${API_KEY:-}" ]; then
+  echo "config-server's response for the API key was not in the expected shape; treating as transient" >&2
+  exit 1
 fi
 
 NAME=$(hostnamectl hostname --pretty 2>/dev/null)
