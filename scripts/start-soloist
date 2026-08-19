@@ -54,36 +54,69 @@ if [ ! -x "$BIN" ]; then
 fi
 
 # Two genuinely different failure modes hide behind "no key", and they need
-# different exits. config-server answering "no such key" (curl --fail turns
-# the 404 into exit 22) means the device is honestly unconfigured -- log the
-# WebUI message and exit 0 so an unconfigured device sits quiet rather than
-# restart-looping. config-server being unreachable (not up yet at boot,
-# crashed, timed out -- curl exit 6/7/28/anything else) is TRANSIENT, and
-# must exit NON-ZERO so soloist.service's Restart=on-failure actually
-# retries; exiting 0 here would leave the player silently and permanently
-# down after nothing worse than a boot-order race. --show-error (mirroring
-# soloist-fetch) puts curl's own error text into the same capture so the log
-# names the real failure instead of just an empty API_KEY.
-API_RESPONSE=$(curl --fail --silent --show-error --max-time 5 \
-  "${CONFIG_SERVER}/api/v1/key/player.soloist.api_key/secure" 2>&1)
-CURL_STATUS=$?
-
-if [ "$CURL_STATUS" -ne 0 ]; then
-  if [ "$CURL_STATUS" -eq 22 ]; then
-    echo "No Soloist API key configured. Enter one in the HiFiBerry web interface."
-    exit 0
-  fi
-  echo "Could not reach config-server for the API key (curl exit ${CURL_STATUS}): ${API_RESPONSE}" >&2
+# different exits. config-server answering HTTP 404 for the key (checked
+# below against the ACTUAL numeric status code, not curl's --fail/exit-22
+# shorthand -- --fail collapses EVERY status >= 400 into the same exit 22,
+# so a 500/503 from config-server, e.g. a ConfigDB lock or internal error
+# while the service is otherwise up, would land on the same branch as a
+# genuine 404 and get reported as "not configured") means the device is
+# honestly unconfigured -- log the WebUI message and exit 0 so an
+# unconfigured device sits quiet rather than restart-looping. Everything
+# else -- config-server unreachable (curl exit 6/7/28/...; not an HTTP
+# response at all), a non-404 HTTP error (500, 503, an unexpected 4xx), or a
+# 200 body that doesn't parse into the shape we expect -- is
+# TRANSIENT/unknown, and must exit NON-ZERO so soloist.service's
+# Restart=on-failure actually retries; exiting 0 for any of these would
+# leave the player silently and permanently down after nothing worse than
+# config-server hiccuping. This call is direct loopback to config-server's
+# own port (127.0.0.1:1081), not through the nginx auth gateway, so a
+# spurious 401/403 is not a realistic case here and isn't special-cased.
+BODY_FILE=$(mktemp) || BODY_FILE=""
+ERR_FILE=$(mktemp) || ERR_FILE=""
+if [ -z "$BODY_FILE" ] || [ -z "$ERR_FILE" ]; then
+  echo "Could not create a temp file to hold config-server's response" >&2
+  rm -f "$BODY_FILE" "$ERR_FILE"
   exit 1
 fi
 
-# config-server answered; still distinguish a well-formed "no value" (or a
-# JSON null, which json.load turns into Python None -- falsy, same as
-# missing or empty) from a response that is not even in the shape we expect.
+# --show-error (mirroring soloist-fetch) puts curl's own error text in
+# ERR_FILE so a transport failure names the real cause instead of leaving
+# just an empty body. -o/-w separate the response body from its HTTP status
+# so the branches below can key off the real status code rather than curl's
+# collapsed --fail/exit-22 shorthand.
+HTTP_STATUS=$(curl --silent --show-error --max-time 5 \
+  -o "$BODY_FILE" -w '%{http_code}' \
+  "${CONFIG_SERVER}/api/v1/key/player.soloist.api_key/secure" 2>"$ERR_FILE")
+CURL_STATUS=$?
+CURL_ERR=$(cat "$ERR_FILE")
+rm -f "$ERR_FILE"
+
+if [ "$CURL_STATUS" -ne 0 ]; then
+  rm -f "$BODY_FILE"
+  echo "Could not reach config-server for the API key (curl exit ${CURL_STATUS}): ${CURL_ERR}" >&2
+  exit 1
+fi
+
+if [ "$HTTP_STATUS" = "404" ]; then
+  rm -f "$BODY_FILE"
+  echo "No Soloist API key configured. Enter one in the HiFiBerry web interface."
+  exit 0
+fi
+
+if [ "$HTTP_STATUS" != "200" ]; then
+  BODY_SNIPPET=$(head -c 200 "$BODY_FILE" 2>/dev/null)
+  rm -f "$BODY_FILE"
+  echo "config-server returned HTTP ${HTTP_STATUS} for the API key (expected 200 or 404): ${BODY_SNIPPET}" >&2
+  exit 1
+fi
+
+# config-server answered 200; still distinguish a well-formed "no value" (or
+# a JSON null, which json.load turns into Python None -- falsy, same as
+# missing or empty) from a body that is not even in the shape we expect.
 # The former is genuinely unconfigured (exit 0, sit quiet); the latter is
 # unknown/transient (exit 1, let systemd retry) rather than misreporting it
 # as "not configured", which is exactly the assertion that misdirects.
-API_KEY=$(printf '%s' "$API_RESPONSE" | python3 -c '
+API_KEY=$(python3 -c '
 import json, sys
 try:
     d = json.load(sys.stdin)
@@ -96,8 +129,9 @@ if value:
     print(value)
     sys.exit(0)
 sys.exit(2)
-' 2>/dev/null)
+' < "$BODY_FILE" 2>/dev/null)
 PARSE_STATUS=$?
+rm -f "$BODY_FILE"
 
 if [ "$PARSE_STATUS" -eq 2 ]; then
   echo "No Soloist API key configured. Enter one in the HiFiBerry web interface."
