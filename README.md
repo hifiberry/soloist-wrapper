@@ -1,0 +1,38 @@
+# hifiberry-soloist-wrapper
+
+Runs Spotify Soloist as a Spotify Connect endpoint on HiFiBerryOS and
+bridges its local WebSocket API to audiocontrol, providing metadata,
+artwork, queue and transport control through the same interface every
+other player uses.
+
+This package does not contain the Spotify Soloist binary, which may not be
+redistributed. It is downloaded from Spotify on first use (`soloist-fetch`),
+and each user must supply their own Soloist API key from the Spotify for
+Developers dashboard, entered through the WebUI and stored in ConfigDB. A
+Spotify Premium account is required.
+
+## Known limitations
+
+- **No outbound HTTPS, no Soloist.** `soloist-fetch` downloads the Soloist
+  binary from Spotify's CDN over HTTPS on first install, and the installed
+  build stops authenticating 90 days after it was fetched unless
+  `soloist-update` can reach the same CDN to refresh it. A device without
+  outbound HTTPS access can therefore neither install Soloist nor keep an
+  existing install working past that 90-day window.
+- **The API key is visible in `/proc/<pid>/cmdline`.** Soloist takes its API
+  key only as a command-line argument (`start-soloist`'s only input path for
+  it), so any local user who can read `/proc/<pid>/cmdline` for the running
+  `soloist` process can recover the key. This is a documented, accepted
+  risk, not a bug: the key is never written to a service unit, environment
+  file, or log, and the local-user threat model is the same one every other
+  process-argument secret on the device already accepts.
+- **Volume is not synchronised between Spotify and the device mixer.**
+  `soloist-bridge` deliberately drops Soloist's `volume_changed` events and
+  never issues a `set_volume` command (see the bridge's command
+  translation). The device volume is pinned once, at startup, by
+  `start-soloist --initial-volume 100`; remote volume changes made from the
+  Spotify app move Soloist's internal attenuation but are not reflected
+  back to ACR or the device mixer. See the spec's "Volume reconciliation"
+  section for why forwarding was considered and rejected (Spotify's app
+  slider is quantised to 16 steps, coarser than ACR's own range, and
+  correct forwarding would need a reset-to-100 echo-suppression loop).
