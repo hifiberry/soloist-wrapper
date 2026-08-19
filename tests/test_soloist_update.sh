@@ -6,9 +6,9 @@
 # sed-substituted copy pointing that at a local mock is used instead -- the
 # same dependency-injection style as tests/test_soloist_fetch.sh uses for
 # soloist-fetch's own BASE_URL.
-# shellcheck disable=SC2329 # setup_*/helper functions are invoked indirectly
-# by name via run_case's "$setup_fn" argument; shellcheck's static analysis
-# cannot see that.
+# shellcheck disable=SC2329,SC2317 # setup_*/helper functions are invoked
+# indirectly by name via run_case's "$setup_fn" argument; shellcheck's static
+# analysis cannot see that (SC2329 on 0.11.x, SC2317 on 0.10.x).
 set -u
 FAILURES=0
 
