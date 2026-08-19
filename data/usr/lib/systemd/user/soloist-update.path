@@ -6,13 +6,36 @@ PathExists=%h/.local/share/soloist/expired
 Unit=soloist-update.service
 # soloist-fetch only clears the flag on a SUCCESSFUL refresh (see
 # soloist-update's header comment for why soloist-update itself must not).
-# That means a failed refresh leaves the flag in place, and PathExists=
+# A failed refresh therefore leaves the flag in place, and PathExists=
 # re-evaluates as soon as the triggered oneshot exits -- without a limit
-# this becomes a tight retry loop. Bound it instead: at most one trigger an
-# hour. The daily timer remains the long-term backstop for a device that
-# stays offline past an hour.
+# this is a tight retry loop.
+#
+# TriggerLimitIntervalSec=/TriggerLimitBurst= is NOT a rate limit or a
+# bounded periodic retry: per systemd.path(5), once the burst is exceeded
+# within the interval, THIS UNIT IS PLACED INTO A PERMANENT "failed" STATE
+# AND STOPS WATCHING THE FLAG FOR THE REST OF THE BOOT. There is no
+# automatic recovery -- only `systemctl --user reset-failed
+# soloist-update.path` or a reboot re-arms it. So a persistently failing
+# fetch (device stays offline) gets a handful of quick retries and then
+# this unit goes quiet; it is not "retry hourly forever".
+#
+# That degradation is acceptable because soloist-update.timer (daily) is a
+# fully independent unit and is unaffected by this one's failed state. An
+# expired build is by definition more than 90 days old, i.e. already past
+# BOTH the 60-day "parsed" and 30-day "fallback" freshness thresholds in
+# scripts/soloist-update -- so the very next daily timer run always
+# refetches it, with or without this path unit. This unit exists purely to
+# recover FASTER than "wait for tomorrow's timer" when the failure was
+# transient (e.g. network not up yet at boot); it is not the primary
+# defence against an expired build, the timer is.
+#
+# Burst chosen as 3 (initial trigger + 2 genuine retries) inside a 1h
+# window: enough attempts to ride out a short transient failure without
+# reintroducing the hot loop a burst of 0 (limit disabled) would bring
+# back, and small enough that a persistently failing device parks this
+# unit quickly rather than hammering retries for an hour.
 TriggerLimitIntervalSec=1h
-TriggerLimitBurst=1
+TriggerLimitBurst=3
 
 [Install]
 WantedBy=default.target

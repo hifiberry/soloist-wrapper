@@ -31,9 +31,18 @@
 # and soloist-fetch's success path is the only thing that removes it.
 # soloist-update.path guards against the hot-loop this would otherwise cause
 # (a failed fetch leaves the flag in place, and PathExists= re-triggers as
-# soon as the oneshot exits) with TriggerLimitIntervalSec/TriggerLimitBurst,
-# so a persistently failing fetch retries at a bounded rate instead of in a
-# tight loop; the daily timer remains the long-term backstop.
+# soon as the oneshot exits) with TriggerLimitIntervalSec/TriggerLimitBurst
+# (see that unit's own comment for exactly what this does and does not do).
+# It is NOT a bounded retry loop: once its burst is exceeded, systemd parks
+# soloist-update.path in a permanent "failed" state for the rest of the
+# boot -- no more retries until the unit is reset or the device reboots.
+# That is fine here specifically because soloist-update.timer (daily) is an
+# independent unit that is unaffected by the path unit's failure and always
+# refetches on its next run: an expired build is by definition >90 days
+# old, already past both the 60-day parsed and 30-day fallback thresholds
+# above, so the timer alone guarantees recovery regardless of whether the
+# path unit is still watching. The path unit only buys a chance at faster
+# recovery than waiting for tomorrow's timer, for a transient failure.
 set -u
 
 BIN_DIR="${HOME}/.local/bin"
