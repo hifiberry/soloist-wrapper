@@ -50,9 +50,18 @@ if ! VERSION_OUTPUT=$("$CANDIDATE" --version 2>&1); then
   exit 4
 fi
 
-mkdir -p "$BIN_DIR" "$DATA_DIR"
-install -m 755 "$CANDIDATE" "${BIN_DIR}/soloist.new"
-mv -f "${BIN_DIR}/soloist.new" "${BIN_DIR}/soloist"
+mkdir -p "$BIN_DIR" "$DATA_DIR" || {
+  echo "Could not create ${BIN_DIR} or ${DATA_DIR}" >&2
+  exit 4
+}
+if ! install -m 755 "$CANDIDATE" "${BIN_DIR}/soloist.new"; then
+  echo "Could not install binary to ${BIN_DIR}/soloist.new" >&2
+  exit 4
+fi
+if ! mv -f "${BIN_DIR}/soloist.new" "${BIN_DIR}/soloist"; then
+  echo "Could not move ${BIN_DIR}/soloist.new into place at ${BIN_DIR}/soloist" >&2
+  exit 4
+fi
 
 # --version prints version, build timestamp, build identifiers, platform and
 # architecture. Observed real output (arm64, 2026-08-19):
@@ -60,21 +69,32 @@ mv -f "${BIN_DIR}/soloist.new" "${BIN_DIR}/soloist"
 # There is no ISO (YYYY-MM-DD) date anywhere in it; the build date is a bare
 # YYYYMMDD token in parens. Try ISO form first in case a future build changes
 # format, then the YYYYMMDD form actually observed, then fall back to today
-# so the expiry logic still has a lower bound to work from.
+# so the expiry logic still has a lower bound to work from. The fallback is
+# a guess, not a fact, so it is flagged loudly (stderr warning) and recorded
+# in version.json's build_date_source so later tasks can tell parsed from
+# guessed dates apart.
 BUILD_DATE=$(printf '%s\n' "$VERSION_OUTPUT" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}' | head -1)
-if [ -z "$BUILD_DATE" ]; then
+if [ -n "$BUILD_DATE" ]; then
+  BUILD_DATE_SOURCE="parsed"
+else
   BUILD_DATE_RAW=$(printf '%s\n' "$VERSION_OUTPUT" | grep -oE '\(20[0-9]{6}\)' | head -1 | tr -d '()')
   if [ -n "$BUILD_DATE_RAW" ]; then
     BUILD_DATE="${BUILD_DATE_RAW:0:4}-${BUILD_DATE_RAW:4:2}-${BUILD_DATE_RAW:6:2}"
+    BUILD_DATE_SOURCE="parsed"
   fi
 fi
-[ -n "$BUILD_DATE" ] || BUILD_DATE=$(date -u +%Y-%m-%d)
+if [ -z "$BUILD_DATE" ]; then
+  BUILD_DATE=$(date -u +%Y-%m-%d)
+  BUILD_DATE_SOURCE="fallback"
+  echo "WARNING: could not parse a build date from --version output; using today (${BUILD_DATE}) as a lower bound. Raw output: ${VERSION_OUTPUT}" >&2
+fi
 VERSION=$(printf '%s\n' "$VERSION_OUTPUT" | head -1 | tr -d '"')
 
 cat > "$VERSION_FILE" <<EOF
 {
   "version": "${VERSION}",
   "build_date": "${BUILD_DATE}",
+  "build_date_source": "${BUILD_DATE_SOURCE}",
   "installed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "arch": "${ARCH}"
 }

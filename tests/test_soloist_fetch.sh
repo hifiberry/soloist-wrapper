@@ -14,7 +14,8 @@ check() {
 }
 
 SCRIPT="$(dirname "$0")/../scripts/soloist-fetch"
-export HOME=$(mktemp -d)
+HOME=$(mktemp -d)
+export HOME
 
 # 1. Unsupported architecture
 cat > "$HOME/uname" <<'EOF'
