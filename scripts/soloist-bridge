@@ -19,7 +19,10 @@ import json
 import logging
 import os
 import pathlib
+import queue
+import signal
 import subprocess
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -42,18 +45,28 @@ COVER_SIZE_ORDER = ["small", "default", "large", "xlarge"]
 
 
 def _identity_name(entity):
-    """The display name inside an entity envelope, or None."""
+    """The display name inside an entity envelope, or None.
+
+    Every `.get(key) or {}` below (rather than `.get(key, {})`) matters:
+    Soloist is closed-source and a real capture already showed shapes that
+    vary by content type, so an explicit JSON null for any of these keys
+    (not just the key being absent) must not raise -- `.get(key, {})` only
+    substitutes its default when the key is MISSING, not when it is present
+    with value None.
+    """
     if not isinstance(entity, dict):
         return None
-    return (entity.get("decorations", {})
-                  .get("identity", {})
-                  .get("name"))
+    return ((entity.get("decorations") or {})
+                  .get("identity") or {}).get("name")
 
 
 def best_cover_url(decorations):
     """The largest cover URL in a decorations block, or None."""
-    covers = decorations.get("visual_identity", {}).get("cover")
+    covers = (decorations.get("visual_identity") or {}).get("cover")
     if not isinstance(covers, list) or not covers:
+        return None
+    covers = [c for c in covers if isinstance(c, dict)]
+    if not covers:
         return None
 
     def rank(cover):
@@ -68,19 +81,20 @@ def song_from_item(item):
     """Flatten Soloist's entity envelope into audiocontrol's song shape."""
     if not isinstance(item, dict):
         return None
-    decorations = item.get("decorations", {}) or {}
+    decorations = item.get("decorations") or {}
 
     creators = decorations.get("creators") or []
-    names = [n for n in (_identity_name(c.get("entity")) for c in creators) if n]
+    names = [n for n in (_identity_name(c.get("entity")) for c in creators
+                         if isinstance(c, dict)) if n]
     # ACR's generic song carries a single artist string.
     artist = ", ".join(names) if names else None
 
-    duration_ms = decorations.get("playback", {}).get("duration_ms")
+    duration_ms = (decorations.get("playback") or {}).get("duration_ms")
 
     return {
-        "title": decorations.get("identity", {}).get("name"),
+        "title": (decorations.get("identity") or {}).get("name"),
         "artist": artist,
-        "album": _identity_name(decorations.get("parent", {}).get("entity")),
+        "album": _identity_name((decorations.get("parent") or {}).get("entity")),
         "duration": duration_ms / 1000.0 if isinstance(duration_ms, (int, float)) else None,
         "uri": item.get("uri"),
         "cover_art_url": best_cover_url(decorations),
@@ -108,7 +122,15 @@ def _queue_entries(upcoming):
 
 
 def translate(event):
-    """One Soloist event -> zero or more audiocontrol generic events."""
+    """One Soloist event -> zero or more audiocontrol generic events.
+
+    A malformed field anywhere below can still raise (e.g. a non-numeric
+    position_ms). That is deliberate: the caller (SoloistConnection.
+    _handle_event) wraps the whole per-event dispatch in a try/except so
+    one bad event costs one event, not the WebSocket connection -- see its
+    docstring. Guessing a fallback value here would risk silently hiding a
+    real upstream bug instead.
+    """
     kind = event.get("type")
 
     if kind == "playback_state":
@@ -203,9 +225,13 @@ def soloist_command(payload):
         return [{"type": "command", "command": "set_shuffle",
                  "enabled": bool(payload.get("shuffle"))}]
     if command == "set_loop_mode":
-        # LoopMode's Display vocabulary: "no" | "song" | "playlist".
+        # LoopMode's Display vocabulary: "no" | "song" | "playlist". Also
+        # accept "track" as an alias for "song": our own outbound
+        # loop_mode_from_repeat() emits "track" (ACR's documented
+        # vocabulary is none|song|track|playlist), so a caller that echoes
+        # back what we send it must round-trip correctly.
         mode = payload.get("loop_mode")
-        if mode == "song":
+        if mode in ("song", "track"):
             return [{"type": "command", "command": "set_repeat_track", "enabled": True}]
         if mode == "playlist":
             return [{"type": "command", "command": "set_repeat_context", "enabled": True}]
@@ -214,108 +240,6 @@ def soloist_command(payload):
 
     LOG.debug("Ignoring unknown command %r", command)
     return []
-
-
-class SoloistConnection:
-    """Owns the WebSocket to soloist, and the state /status reports."""
-
-    def __init__(self):
-        self._ws = None
-        self._lock = threading.Lock()
-        self.logged_in = False
-        self.is_active = False
-        self.device_name = None
-        self.connected = False
-
-    # -- endpoint discovery ------------------------------------------------
-
-    @staticmethod
-    def _endpoint():
-        """Read the address soloist wrote for its ephemeral WebSocket port.
-
-        The port changes every time soloist restarts, so this is re-read on
-        every connection attempt rather than cached.
-        """
-        try:
-            addr = (DATA_DIR / "ws.addr").read_text().strip()
-            port = (DATA_DIR / "ws.port").read_text().strip()
-        except OSError:
-            return None
-        if not addr or not port:
-            return None
-        return f"ws://{addr}:{port}"
-
-    # -- outbound ------------------------------------------------------
-
-    def send(self, message):
-        with self._lock:
-            if self._ws is None:
-                LOG.debug("Dropping command, not connected: %r", message)
-                return False
-            try:
-                self._ws.send(json.dumps(message))
-                return True
-            except Exception as exc:  # noqa: BLE001 - reconnect loop handles it
-                LOG.warning("Send failed: %s", exc)
-                return False
-
-    # -- inbound -------------------------------------------------------
-
-    def run_forever(self):
-        import websocket  # python3-websocket (websocket-client)
-
-        backoff = 1
-        while True:
-            url = self._endpoint()
-            if url is None:
-                LOG.debug("No ws.addr/ws.port yet; soloist not running")
-                time.sleep(min(backoff, 30))
-                backoff = min(backoff * 2, 30)
-                continue
-            try:
-                LOG.info("Connecting to %s", url)
-                ws = websocket.create_connection(url, timeout=10)
-                with self._lock:
-                    self._ws = ws
-                self.connected = True
-                backoff = 1
-                ws.send(json.dumps({"type": "command", "command": "get_state"}))
-                self._read_loop(ws)
-            except Exception as exc:  # noqa: BLE001 - any failure means reconnect
-                LOG.warning("WebSocket error: %s", exc)
-            finally:
-                self.connected = False
-                with self._lock:
-                    self._ws = None
-                time.sleep(min(backoff, 30))
-                backoff = min(backoff * 2, 30)
-
-    def _read_loop(self, ws):
-        while True:
-            raw = ws.recv()
-            if not raw:
-                return
-            try:
-                event = json.loads(raw)
-            except ValueError:
-                LOG.warning("Non-JSON frame: %r", raw[:200])
-                continue
-
-            kind = event.get("type")
-            if kind == "auth_state":
-                self.logged_in = bool(event.get("logged_in"))
-                self.is_active = bool(event.get("is_active"))
-                self.device_name = event.get("device_name")
-                LOG.info("Auth state: logged_in=%s active=%s name=%s",
-                         self.logged_in, self.is_active, self.device_name)
-            elif kind == "device_changed":
-                self.is_active = bool(event.get("is_active"))
-                self.device_name = event.get("device_name") or self.device_name
-            elif kind == "error":
-                LOG.warning("Soloist error: %s", event.get("message"))
-
-            for acr_event in translate(event):
-                post_to_acr(acr_event)
 
 
 def post_to_acr(event):
@@ -331,6 +255,265 @@ def post_to_acr(event):
         LOG.debug("audiocontrol unreachable (%s); dropping %s", exc, event.get("type"))
     except Exception as exc:  # noqa: BLE001
         LOG.debug("Failed to post %s: %s", event.get("type"), exc)
+
+
+class AcrPoster:
+    """Posts translated events to audiocontrol from a dedicated thread.
+
+    post_to_acr() above does a blocking HTTP request. audiocontrol being
+    DOWN is fine either way -- connection-refused returns immediately, so
+    post_to_acr() drops the event and moves on -- but audiocontrol being
+    HUNG (accepting the TCP connection, never responding) would stall
+    whoever calls post_to_acr() for up to its timeout, and a single
+    playback_state alone expands to five ACR events. Under sustained
+    position_sync traffic, calling post_to_acr() straight from the
+    WebSocket reader would make the reader fall behind faster than it
+    drains -- a shorter timeout only bounds the damage per event, it does
+    not eliminate the coupling. Routing every post through a bounded queue
+    and a dedicated thread instead makes ACR's latency structurally unable
+    to slow down WebSocket reading.
+
+    On overflow the OLDEST queued entry is dropped, not the newest: a stale
+    position/song update is a smaller problem than losing whatever just
+    happened.
+    """
+
+    def __init__(self, maxsize=200):
+        self._queue = queue.Queue(maxsize=maxsize)
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def submit(self, event):
+        try:
+            self._queue.put_nowait(event)
+        except queue.Full:
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self._queue.put_nowait(event)
+            except queue.Full:
+                pass  # lost a race with another producer; fine to drop
+
+    def _run(self):
+        while True:
+            event = self._queue.get()
+            post_to_acr(event)
+
+
+class SoloistConnection:
+    """Owns the WebSocket to soloist, and the state /status reports."""
+
+    def __init__(self, poster):
+        self._ws = None
+        self._ws_lock = threading.Lock()  # guards the live websocket object
+        # Guards the four fields below as a single unit, so a concurrent
+        # GET /status (build_status -> snapshot()) never observes a
+        # half-updated set -- e.g. connected already flipped False but
+        # logged_in still True from the previous session (Important D).
+        self._state_lock = threading.Lock()
+        self._poster = poster
+        self.logged_in = False
+        self.is_active = False
+        self.device_name = None
+        self.connected = False
+
+    # -- state, read atomically by build_status() ---------------------
+
+    def snapshot(self):
+        """Atomic read of the fields build_status() reports."""
+        with self._state_lock:
+            return {
+                "connected": self.connected,
+                "logged_in": self.logged_in,
+                "is_active": self.is_active,
+                "device_name": self.device_name,
+            }
+
+    def _mark_connected(self):
+        with self._state_lock:
+            self.connected = True
+
+    def _mark_disconnected(self):
+        """Called whenever the WebSocket goes away, for any reason.
+
+        Resets auth/activity state too, not just `connected` -- otherwise
+        /status keeps reporting a stale logged_in/is_active/device_name for
+        a daemon that is no longer there (Important D). The next
+        successful connection's auth_state frame repopulates all of it.
+        """
+        with self._state_lock:
+            self.connected = False
+            self.logged_in = False
+            self.is_active = False
+            self.device_name = None
+
+    def _update_auth_state(self, logged_in, is_active, device_name):
+        with self._state_lock:
+            self.logged_in = logged_in
+            self.is_active = is_active
+            self.device_name = device_name
+
+    def _update_device_changed(self, is_active, device_name):
+        with self._state_lock:
+            self.is_active = is_active
+            if device_name:
+                self.device_name = device_name
+
+    # -- endpoint discovery ------------------------------------------------
+
+    @staticmethod
+    def _endpoint():
+        """Read the address soloist wrote for its ephemeral WebSocket port.
+
+        The port changes every time soloist restarts, so this is re-read on
+        every connection attempt rather than cached.
+        """
+        try:
+            addr = (DATA_DIR / "ws.addr").read_text().strip()
+            port = (DATA_DIR / "ws.port").read_text().strip()
+        except (OSError, ValueError):
+            # ValueError also catches UnicodeDecodeError: a non-UTF-8
+            # ws.addr/ws.port must not escape this method and kill the
+            # reader thread (Important F).
+            return None
+        if not addr or not port:
+            return None
+        return f"ws://{addr}:{port}"
+
+    # -- outbound ------------------------------------------------------
+
+    def send(self, message):
+        with self._ws_lock:
+            if self._ws is None:
+                LOG.debug("Dropping command, not connected: %r", message)
+                return False
+            try:
+                self._ws.send(json.dumps(message))
+                return True
+            except Exception as exc:  # noqa: BLE001 - reconnect loop handles it
+                LOG.warning("Send failed: %s", exc)
+                return False
+
+    # -- inbound -------------------------------------------------------
+
+    def run_forever(self):
+        """Thread target for the WebSocket reader.
+
+        Any exception that escapes this method (a bug, not a day-to-day
+        failure like soloist being offline -- that is handled inside the
+        loop below) is treated as fatal to the whole PROCESS, not just this
+        thread: this runs as a daemon thread, so if it merely died silently,
+        main() would keep serving HTTP forever with bridge_connected
+        permanently false and Restart=always never firing, because the
+        process itself never exits (Important F).
+        """
+        try:
+            self._run_loop()
+        except Exception:  # noqa: BLE001 - see docstring: this must be fatal
+            LOG.critical("Reader thread died unexpectedly; exiting so systemd restarts us",
+                         exc_info=True)
+            os._exit(1)
+
+    def _run_loop(self):
+        import websocket  # python3-websocket (websocket-client)
+
+        backoff = 1
+        while True:
+            url = self._endpoint()
+            if url is None:
+                LOG.debug("No ws.addr/ws.port yet; soloist not running")
+                time.sleep(min(backoff, 30))
+                backoff = min(backoff * 2, 30)
+                continue
+            ws = None
+            try:
+                LOG.info("Connecting to %s", url)
+                ws = websocket.create_connection(url, timeout=10)
+                # create_connection()'s timeout also becomes the socket's
+                # PERSISTENT recv() timeout, not just the handshake's --
+                # confirmed from the websocket-client source
+                # (self.sock.settimeout(timeout)). Left at 10s, a
+                # silent-but-alive connection (a paused device sends
+                # nothing) would have recv() raise
+                # WebSocketTimeoutException every 10s, which the except
+                # below can only read as a dead connection -- producing an
+                # endless reconnect-every-~11s cycle on an idle device,
+                # each one a full get_state -> 5-event ACR burst and a
+                # ~1s bridge_connected:false window (Critical). Clearing
+                # the timeout after the handshake makes recv() block
+                # indefinitely; a dead daemon is still detected because
+                # its socket then errors or closes, not by silence.
+                ws.settimeout(None)
+                with self._ws_lock:
+                    self._ws = ws
+                self._mark_connected()
+                backoff = 1
+                ws.send(json.dumps({"type": "command", "command": "get_state"}))
+                self._read_loop(ws)
+            except Exception as exc:  # noqa: BLE001 - any failure means reconnect
+                LOG.warning("WebSocket error: %s", exc)
+            finally:
+                self._mark_disconnected()
+                with self._ws_lock:
+                    self._ws = None
+                if ws is not None:
+                    try:
+                        ws.close()
+                    except Exception:  # noqa: BLE001 - already tearing down
+                        pass
+                # Tell audiocontrol the player is gone rather than leaving
+                # it showing the last state forever (Important C). A
+                # direct, synchronous post is fine here -- this runs once
+                # per reconnect cycle, not once per event, so it cannot
+                # become the per-event ACR-latency problem AcrPoster exists
+                # to avoid.
+                post_to_acr({"type": "state_changed", "state": "disconnected"})
+                time.sleep(min(backoff, 30))
+                backoff = min(backoff * 2, 30)
+
+    def _read_loop(self, ws):
+        while True:
+            raw = ws.recv()
+            if not raw:
+                return
+            try:
+                event = json.loads(raw)
+            except ValueError:
+                LOG.warning("Non-JSON frame: %r", raw[:200])
+                continue
+
+            try:
+                self._handle_event(event)
+            except Exception as exc:  # noqa: BLE001 - one bad event must cost
+                # one event, not the connection (Important A). Soloist is
+                # closed-source and its shapes vary by content type
+                # (podcasts, local files, ads) -- a malformed field here
+                # (e.g. a string position_ms) must not tear the whole
+                # connection down and restart the get_state/re-crash cycle
+                # forever.
+                LOG.warning("Failed to handle event %r: %s",
+                           event.get("type") if isinstance(event, dict) else event, exc)
+                continue
+
+    def _handle_event(self, event):
+        if not isinstance(event, dict):
+            return
+        kind = event.get("type")
+        if kind == "auth_state":
+            self._update_auth_state(bool(event.get("logged_in")),
+                                    bool(event.get("is_active")),
+                                    event.get("device_name"))
+            LOG.info("Auth state: logged_in=%s active=%s name=%s",
+                     self.logged_in, self.is_active, self.device_name)
+        elif kind == "device_changed":
+            self._update_device_changed(bool(event.get("is_active")),
+                                        event.get("device_name"))
+        elif kind == "error":
+            LOG.warning("Soloist error: %s", event.get("message"))
+
+        for acr_event in translate(event):
+            self._poster.submit(acr_event)
 
 
 def read_version_info():
@@ -352,30 +535,36 @@ def build_status(connection):
             expires_on = (built + datetime.timedelta(days=90)).isoformat()
         except ValueError:
             expires_on = None
+    state = connection.snapshot()
     return {
         "binary_installed": installed,
         "version": (version or {}).get("version"),
         "build_date": (version or {}).get("build_date"),
         "expires_on": expires_on,
-        "bridge_connected": connection.connected,
-        "logged_in": connection.logged_in,
-        "is_active": connection.is_active,
-        "device_name": connection.device_name,
+        "bridge_connected": state["connected"],
+        "logged_in": state["logged_in"],
+        "is_active": state["is_active"],
+        "device_name": state["device_name"],
     }
 
 
 class BridgeHandler(BaseHTTPRequestHandler):
-    # NOT named "connection" -- BaseHTTPRequestHandler's superclass
-    # (socketserver.BaseRequestHandler) sets self.connection to the raw
-    # client socket in its own __init__, which shadows a class attribute
-    # of that name on every instance. Confirmed live: naming it "connection"
-    # here makes GET /status crash with
-    # "'socket' object has no attribute 'connected'" on the very first
-    # request, because self.connection resolves to the socket, not to the
-    # SoloistConnection set below in main().
-    soloist_connection = None  # set in main()
-    install_lock = threading.Lock()
-    install_state = {"running": False, "returncode": None, "output": ""}
+    # Every attribute this class owns is prefixed "bridge_", on purpose:
+    # this class inherits from BaseHTTPRequestHandler, whose ancestor
+    # socketserver.BaseRequestHandler sets several UNPREFIXED instance
+    # attributes of its own in __init__ -- "connection" (the raw client
+    # socket) is one, and "request"/"client_address" are others; "command"
+    # and "path" (the parsed request line) are set by
+    # BaseHTTPRequestHandler itself. Using a plain name like "connection"
+    # here silently shadows the base class's own attribute of that name --
+    # which is exactly the bug this file shipped with once already (GET
+    # /status crashed with "'socket' object has no attribute 'connected'").
+    # The bridge_ prefix makes that whole collision class structurally
+    # impossible to hit again, rather than something to re-verify by hand
+    # for every new attribute.
+    bridge_connection = None  # set in main()
+    bridge_install_lock = threading.Lock()
+    bridge_install_state = {"running": False, "returncode": None, "output": ""}
 
     def log_message(self, fmt, *args):  # quieter than the stdlib default
         LOG.debug("%s - %s", self.address_string(), fmt % args)
@@ -390,15 +579,35 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/status":
-            self._json(build_status(self.soloist_connection))
+            self._json(build_status(self.bridge_connection))
         elif self.path == "/install":
-            self._json(dict(self.install_state))
+            self._json(dict(self.bridge_install_state))
         else:
             self._json({"error": "not found"}, status=404)
 
+    def _read_body(self):
+        """The raw POST body, or None if the request is malformed.
+
+        Guards two ways a body can misbehave: a non-numeric Content-Length
+        previously raised ValueError uncaught here, escaping into
+        socketserver's handle_error as a traceback with no HTTP response at
+        all (Minor A); and chunked Transfer-Encoding, which this handler
+        does not decode and would otherwise silently read as an empty body
+        and treat as a valid empty command.
+        """
+        if self.headers.get("Transfer-Encoding", "").lower() == "chunked":
+            return None
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return None
+        return self.rfile.read(length) if length else b"{}"
+
     def do_POST(self):
-        length = int(self.headers.get("Content-Length") or 0)
-        raw = self.rfile.read(length) if length else b"{}"
+        raw = self._read_body()
+        if raw is None:
+            self._json({"error": "malformed request"}, status=400)
+            return
 
         if self.path == "/command":
             try:
@@ -406,9 +615,23 @@ class BridgeHandler(BaseHTTPRequestHandler):
             except ValueError:
                 self._json({"error": "invalid json"}, status=400)
                 return
-            for message in soloist_command(payload):
-                self.soloist_connection.send(message)
-            self._json({"status": "ok"})
+            # A list comprehension, not a generator passed to all(): all()
+            # short-circuits on the first False, which would skip sending
+            # the remaining messages of a multi-message command (e.g.
+            # "stop" -> pause + deactivate) instead of attempting all of
+            # them.
+            results = [self.bridge_connection.send(message)
+                      for message in soloist_command(payload)]
+            if all(results):
+                self._json({"status": "ok"})
+            else:
+                # Propagate the failure instead of claiming success
+                # (Important B): audiocontrol has no other way to learn a
+                # command never reached Soloist, e.g. during one of the
+                # brief disconnect windows a reconnect cycle still has, so
+                # it has no reason to retry or surface anything to the user.
+                self._json({"status": "error", "message": "not connected to soloist"},
+                          status=503)
         elif self.path == "/install":
             self._start_install()
             self._json({"status": "started"})
@@ -416,10 +639,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._json({"error": "not found"}, status=404)
 
     def _start_install(self):
-        with self.install_lock:
-            if self.install_state["running"]:
+        with self.bridge_install_lock:
+            if self.bridge_install_state["running"]:
                 return
-            self.install_state.update(running=True, returncode=None, output="")
+            self.bridge_install_state.update(running=True, returncode=None, output="")
 
         def run():
             try:
@@ -428,10 +651,28 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 output, code = result.stdout + result.stderr, result.returncode
             except Exception as exc:  # noqa: BLE001
                 output, code = str(exc), 1
-            with self.install_lock:
-                self.install_state.update(running=False, returncode=code, output=output)
+            with self.bridge_install_lock:
+                self.bridge_install_state.update(running=False, returncode=code, output=output)
 
         threading.Thread(target=run, daemon=True).start()
+
+
+def _handle_sigterm(signum, frame):
+    """Tell audiocontrol the player is gone before this process dies.
+
+    systemd's PartOf=soloist.service sends SIGTERM here whenever
+    soloist.service stops, including via the WebUI toggle. Python's
+    default SIGTERM action terminates the process immediately with no
+    cleanup, so without this handler audiocontrol keeps showing whatever
+    state it last heard (typically "playing") forever afterwards -- there
+    is nothing left running that could ever correct it (Important C).
+    """
+    LOG.info("Received SIGTERM, telling audiocontrol the player is gone")
+    try:
+        post_to_acr({"type": "state_changed", "state": "disconnected"})
+    except Exception:  # noqa: BLE001 - shutting down regardless
+        pass
+    sys.exit(0)
 
 
 def main():
@@ -439,8 +680,11 @@ def main():
         level=logging.DEBUG if os.environ.get("SOLOIST_BRIDGE_DEBUG") else logging.INFO,
         format="%(levelname)s %(name)s: %(message)s",
     )
-    connection = SoloistConnection()
-    BridgeHandler.soloist_connection = connection
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+
+    poster = AcrPoster()
+    connection = SoloistConnection(poster)
+    BridgeHandler.bridge_connection = connection
 
     threading.Thread(target=connection.run_forever, daemon=True).start()
 

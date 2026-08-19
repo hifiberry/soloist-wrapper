@@ -118,6 +118,45 @@ def test_song_from_item_returns_none_for_no_item():
     assert bridge.song_from_item(None) is None
 
 
+def test_best_cover_url_picks_the_largest_of_distinct_sizes():
+    # The real PLAYBACK_STATE capture above has large == xlarge (same URL),
+    # so it cannot by itself distinguish "picks the largest" from "picks
+    # any of the top two". A synthetic fixture with four DISTINCT URLs
+    # closes that gap (fix-round-1, Minor D).
+    decorations = {"visual_identity": {"cover": [
+        {"url": "https://example.com/small.jpg", "size": "small"},
+        {"url": "https://example.com/default.jpg", "size": "default"},
+        {"url": "https://example.com/large.jpg", "size": "large"},
+        {"url": "https://example.com/xlarge.jpg", "size": "xlarge"},
+    ]}}
+    assert bridge.best_cover_url(decorations) == "https://example.com/xlarge.jpg"
+
+
+def test_song_from_item_tolerates_explicit_nulls():
+    # Real Soloist payloads have been observed to carry an explicit JSON
+    # null for a key that is present but not populated (fix-round-1,
+    # Important A/the reviewer's "playback": null repro). `.get(key, {})`
+    # would raise on this -- only `.get(key) or {}` tolerates it -- because
+    # the default in `.get(key, {})` only applies when the key is MISSING,
+    # not when it is present with value None.
+    item = {
+        "uri": "spotify:track:nulltest",
+        "decorations": {
+            "identity": {"name": "Null Test"},
+            "playback": None,
+            "visual_identity": None,
+            "parent": None,
+            "creators": [None, {"entity": {"decorations": {"identity": {"name": "A"}}}}],
+        },
+    }
+    song = bridge.song_from_item(item)
+    assert song["title"] == "Null Test"
+    assert song["duration"] is None
+    assert song["cover_art_url"] is None
+    assert song["album"] is None
+    assert song["artist"] == "A"
+
+
 def test_playback_state_expands_to_several_acr_events():
     events = bridge.translate(PLAYBACK_STATE)
     kinds = [e["type"] for e in events]
@@ -218,6 +257,16 @@ def test_no_command_ever_sets_volume():
             assert message["command"] != "set_volume"
 
 
+def test_set_volume_command_is_explicitly_ignored():
+    # fix-round-1, Minor C: the sweep above never exercises the
+    # "set_volume"/"volume"/unknown branches, since soloist_command()
+    # emits nothing for them and the inner loop body never runs -- so
+    # those cases were previously untested despite being iterated over.
+    # Make the intent explicit.
+    assert bridge.soloist_command({"command": "set_volume", "volume": 50}) == []
+    assert bridge.soloist_command({"command": "volume", "volume": 50}) == []
+
+
 def test_stop_pauses_and_releases_the_device():
     # Soloist has no stop; pausing and deactivating is the graceful equivalent
     # of librespot's kill-the-unit behaviour, and keeps the device visible.
@@ -235,6 +284,15 @@ def test_loop_mode_maps_to_the_right_repeat_command():
     assert bridge.soloist_command({"command": "set_loop_mode", "loop_mode": "no"}) == [
         {"type": "command", "command": "set_repeat_track", "enabled": False},
         {"type": "command", "command": "set_repeat_context", "enabled": False}]
+
+
+def test_loop_mode_accepts_track_as_a_song_alias():
+    # fix-round-1, Minor B: loop_mode_from_repeat() (our own outbound
+    # translation) emits "track", matching ACR's documented
+    # none|song|track|playlist vocabulary, so a caller echoing that value
+    # back must round-trip to the same command as "song".
+    assert bridge.soloist_command({"command": "set_loop_mode", "loop_mode": "track"}) == [
+        {"type": "command", "command": "set_repeat_track", "enabled": True}]
 
 
 def test_unknown_command_is_ignored():
