@@ -1,0 +1,3 @@
+{ "service": "soloist", "match_prefix": "/api/soloist", "default_tier": "risky", "rules": [
+  { "tier": "ok", "methods": ["GET"], "paths": ["/status"] },
+  { "tier": "risky", "methods": ["*"], "paths": ["/**"] } ]}
