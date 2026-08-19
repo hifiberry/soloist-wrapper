@@ -215,3 +215,239 @@ def soloist_command(payload):
     LOG.debug("Ignoring unknown command %r", command)
     return []
 
+
+class SoloistConnection:
+    """Owns the WebSocket to soloist, and the state /status reports."""
+
+    def __init__(self):
+        self._ws = None
+        self._lock = threading.Lock()
+        self.logged_in = False
+        self.is_active = False
+        self.device_name = None
+        self.connected = False
+
+    # -- endpoint discovery ------------------------------------------------
+
+    @staticmethod
+    def _endpoint():
+        """Read the address soloist wrote for its ephemeral WebSocket port.
+
+        The port changes every time soloist restarts, so this is re-read on
+        every connection attempt rather than cached.
+        """
+        try:
+            addr = (DATA_DIR / "ws.addr").read_text().strip()
+            port = (DATA_DIR / "ws.port").read_text().strip()
+        except OSError:
+            return None
+        if not addr or not port:
+            return None
+        return f"ws://{addr}:{port}"
+
+    # -- outbound ------------------------------------------------------
+
+    def send(self, message):
+        with self._lock:
+            if self._ws is None:
+                LOG.debug("Dropping command, not connected: %r", message)
+                return False
+            try:
+                self._ws.send(json.dumps(message))
+                return True
+            except Exception as exc:  # noqa: BLE001 - reconnect loop handles it
+                LOG.warning("Send failed: %s", exc)
+                return False
+
+    # -- inbound -------------------------------------------------------
+
+    def run_forever(self):
+        import websocket  # python3-websocket (websocket-client)
+
+        backoff = 1
+        while True:
+            url = self._endpoint()
+            if url is None:
+                LOG.debug("No ws.addr/ws.port yet; soloist not running")
+                time.sleep(min(backoff, 30))
+                backoff = min(backoff * 2, 30)
+                continue
+            try:
+                LOG.info("Connecting to %s", url)
+                ws = websocket.create_connection(url, timeout=10)
+                with self._lock:
+                    self._ws = ws
+                self.connected = True
+                backoff = 1
+                ws.send(json.dumps({"type": "command", "command": "get_state"}))
+                self._read_loop(ws)
+            except Exception as exc:  # noqa: BLE001 - any failure means reconnect
+                LOG.warning("WebSocket error: %s", exc)
+            finally:
+                self.connected = False
+                with self._lock:
+                    self._ws = None
+                time.sleep(min(backoff, 30))
+                backoff = min(backoff * 2, 30)
+
+    def _read_loop(self, ws):
+        while True:
+            raw = ws.recv()
+            if not raw:
+                return
+            try:
+                event = json.loads(raw)
+            except ValueError:
+                LOG.warning("Non-JSON frame: %r", raw[:200])
+                continue
+
+            kind = event.get("type")
+            if kind == "auth_state":
+                self.logged_in = bool(event.get("logged_in"))
+                self.is_active = bool(event.get("is_active"))
+                self.device_name = event.get("device_name")
+                LOG.info("Auth state: logged_in=%s active=%s name=%s",
+                         self.logged_in, self.is_active, self.device_name)
+            elif kind == "device_changed":
+                self.is_active = bool(event.get("is_active"))
+                self.device_name = event.get("device_name") or self.device_name
+            elif kind == "error":
+                LOG.warning("Soloist error: %s", event.get("message"))
+
+            for acr_event in translate(event):
+                post_to_acr(acr_event)
+
+
+def post_to_acr(event):
+    """POST one generic-player event to audiocontrol; failures are not fatal."""
+    body = json.dumps(event).encode()
+    req = urlrequest.Request(ACR_UPDATE_URL, data=body,
+                             headers={"Content-Type": "application/json"},
+                             method="POST")
+    try:
+        with urlrequest.urlopen(req, timeout=2):
+            pass
+    except URLError as exc:
+        LOG.debug("audiocontrol unreachable (%s); dropping %s", exc, event.get("type"))
+    except Exception as exc:  # noqa: BLE001
+        LOG.debug("Failed to post %s: %s", event.get("type"), exc)
+
+
+def read_version_info():
+    try:
+        return json.loads(VERSION_FILE.read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def build_status(connection):
+    """The payload behind GET /status. Carries no key material."""
+    version = read_version_info()
+    installed = (pathlib.Path.home() / ".local/bin/soloist").is_file()
+    expires_on = None
+    if version and version.get("build_date"):
+        try:
+            import datetime
+            built = datetime.date.fromisoformat(version["build_date"])
+            expires_on = (built + datetime.timedelta(days=90)).isoformat()
+        except ValueError:
+            expires_on = None
+    return {
+        "binary_installed": installed,
+        "version": (version or {}).get("version"),
+        "build_date": (version or {}).get("build_date"),
+        "expires_on": expires_on,
+        "bridge_connected": connection.connected,
+        "logged_in": connection.logged_in,
+        "is_active": connection.is_active,
+        "device_name": connection.device_name,
+    }
+
+
+class BridgeHandler(BaseHTTPRequestHandler):
+    # NOT named "connection" -- BaseHTTPRequestHandler's superclass
+    # (socketserver.BaseRequestHandler) sets self.connection to the raw
+    # client socket in its own __init__, which shadows a class attribute
+    # of that name on every instance. Confirmed live: naming it "connection"
+    # here makes GET /status crash with
+    # "'socket' object has no attribute 'connected'" on the very first
+    # request, because self.connection resolves to the socket, not to the
+    # SoloistConnection set below in main().
+    soloist_connection = None  # set in main()
+    install_lock = threading.Lock()
+    install_state = {"running": False, "returncode": None, "output": ""}
+
+    def log_message(self, fmt, *args):  # quieter than the stdlib default
+        LOG.debug("%s - %s", self.address_string(), fmt % args)
+
+    def _json(self, payload, status=200):
+        body = json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        if self.path == "/status":
+            self._json(build_status(self.soloist_connection))
+        elif self.path == "/install":
+            self._json(dict(self.install_state))
+        else:
+            self._json({"error": "not found"}, status=404)
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length) if length else b"{}"
+
+        if self.path == "/command":
+            try:
+                payload = json.loads(raw)
+            except ValueError:
+                self._json({"error": "invalid json"}, status=400)
+                return
+            for message in soloist_command(payload):
+                self.soloist_connection.send(message)
+            self._json({"status": "ok"})
+        elif self.path == "/install":
+            self._start_install()
+            self._json({"status": "started"})
+        else:
+            self._json({"error": "not found"}, status=404)
+
+    def _start_install(self):
+        with self.install_lock:
+            if self.install_state["running"]:
+                return
+            self.install_state.update(running=True, returncode=None, output="")
+
+        def run():
+            try:
+                result = subprocess.run(["/usr/bin/soloist-fetch"],
+                                        capture_output=True, text=True, timeout=600)
+                output, code = result.stdout + result.stderr, result.returncode
+            except Exception as exc:  # noqa: BLE001
+                output, code = str(exc), 1
+            with self.install_lock:
+                self.install_state.update(running=False, returncode=code, output=output)
+
+        threading.Thread(target=run, daemon=True).start()
+
+
+def main():
+    logging.basicConfig(
+        level=logging.DEBUG if os.environ.get("SOLOIST_BRIDGE_DEBUG") else logging.INFO,
+        format="%(levelname)s %(name)s: %(message)s",
+    )
+    connection = SoloistConnection()
+    BridgeHandler.soloist_connection = connection
+
+    threading.Thread(target=connection.run_forever, daemon=True).start()
+
+    server = ThreadingHTTPServer(("127.0.0.1", COMMAND_PORT), BridgeHandler)
+    LOG.info("Listening on 127.0.0.1:%d", COMMAND_PORT)
+    server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

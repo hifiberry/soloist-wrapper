@@ -7,13 +7,16 @@ export DEB_BUILD_MAINT_OPTIONS = hardening=+all
 override_dh_auto_build:
 
 override_dh_auto_test:
-	# Both suites are self-contained: soloist-fetch's CDN and soloist-update's
-	# soloist-fetch are always faked (sed-substituted copies pointed at a
-	# loopback HTTP server or a local mock script), so they touch no real
-	# network and are safe to run on every build. A suite nothing executes
-	# rots, so wire both in rather than leaving this target empty.
+	# All three suites are self-contained: soloist-fetch's CDN and
+	# soloist-update's soloist-fetch are always faked (sed-substituted copies
+	# pointed at a loopback HTTP server or a local mock script), and
+	# soloist-bridge's tests exec() the pure translation functions with no
+	# network or subprocess involved -- so all three touch no real network
+	# and are safe to run on every build. A suite nothing executes rots, so
+	# wire all three in rather than leaving this target empty.
 	tests/test_soloist_fetch.sh
 	tests/test_soloist_update.sh
+	python3 -m pytest tests/test_soloist_bridge.py -v
 
 override_dh_auto_install:
 	mkdir -p debian/hifiberry-soloist-wrapper
@@ -21,8 +24,9 @@ override_dh_auto_install:
 	install -D -m0755 scripts/soloist-fetch debian/hifiberry-soloist-wrapper/usr/bin/soloist-fetch
 	install -D -m0755 scripts/soloist-update debian/hifiberry-soloist-wrapper/usr/bin/soloist-update
 	install -D -m0755 scripts/start-soloist debian/hifiberry-soloist-wrapper/usr/bin/start-soloist
+	install -D -m0755 scripts/soloist-bridge debian/hifiberry-soloist-wrapper/usr/bin/soloist-bridge
 
-# This package ships four *user* units and they must NOT all get the same
+# This package ships five *user* units and they must NOT all get the same
 # enable treatment (see usbaudio's debian/rules / README.md for the same
 # idiom applied to a WebUI-toggleable player alongside always-on units):
 #
@@ -41,10 +45,18 @@ override_dh_auto_install:
 #    only spawns soloist-update, which exits 0 with nothing to refresh if
 #    there is no version.json (see scripts/soloist-update), and the path
 #    unit only fires on an expiry flag that only start-soloist ever writes.
-#  - soloist-update.service is left off this list deliberately: it carries
-#    no [Install] section (it is only ever pulled in as a Unit= target by
-#    the path unit or invoked directly), so dh_installsystemduser has
-#    nothing to enable for it either way.
+#  - soloist-update.service and soloist-bridge.service are both left off
+#    this list deliberately: neither carries an [Install] section, so
+#    dh_installsystemduser has nothing to enable for either way. Their file
+#    is still installed (via the cp -r data/* above; dh_installsystemduser
+#    here only manages enable symlinks, not the copy). soloist-update.service
+#    is only ever pulled in as a Unit= target by the path unit or invoked
+#    directly. soloist-bridge.service is pulled in as a runtime dependency of
+#    soloist.service (Wants=soloist-bridge.service there) and stopped by its
+#    own PartOf=soloist.service -- giving it its own WantedBy=default.target
+#    would start its reconnect-backoff loop on every boot even when the user
+#    has never enabled Soloist, since soloist.service itself ships
+#    --no-enable.
 override_dh_installsystemduser:
 	dh_installsystemduser soloist-update.path soloist-update.timer
 	dh_installsystemduser --no-enable soloist.service

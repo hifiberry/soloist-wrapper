@@ -1,0 +1,29 @@
+[Unit]
+Description=Bridge between Spotify Soloist and audiocontrol
+After=soloist.service
+# Stops the bridge whenever soloist.service stops (including the stop half
+# of a restart). Starting is handled the other way around: soloist.service
+# itself carries Wants=soloist-bridge.service, so every (re)start of
+# soloist.service also (re)starts the bridge -- which is exactly what is
+# wanted, since the bridge must re-read ws.port on each connection attempt
+# anyway (Soloist's ephemeral WS port changes on every restart).
+PartOf=soloist.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/soloist-bridge
+Restart=always
+# RestartSec must be well under the default StartLimitIntervalSec (10s) for
+# the default StartLimitBurst (5) to actually stop a persistently crashing
+# unit rather than restarting forever (see soloist.service's RestartSec
+# comment for the full arithmetic). A genuine crash here means a bug, not
+# soloist being down -- the WebSocket reconnect loop already absorbs that
+# without exiting -- so restarting fast is the right default.
+RestartSec=2
+
+# No [Install] section, deliberately: soloist-bridge is never started on
+# its own boot-time trigger. It is pulled in exclusively as a dependency of
+# soloist.service (see the Wants= there), which itself ships --no-enable
+# and is only turned on from the WebUI. Giving this unit its own
+# WantedBy=default.target would start it -- and its reconnect-backoff loop
+# -- on every boot even on a device where Soloist has never been enabled.
