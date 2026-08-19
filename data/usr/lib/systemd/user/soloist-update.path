@@ -1,0 +1,9 @@
+[Unit]
+Description=React to an expired Spotify Soloist build
+
+[Path]
+PathExists=%h/.local/share/soloist/expired
+Unit=soloist-update.service
+
+[Install]
+WantedBy=default.target

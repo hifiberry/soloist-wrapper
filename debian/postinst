@@ -10,4 +10,15 @@ if [ -d /run/systemd/system ] && systemctl is-active --quiet config-server 2>/de
     systemctl restart config-server >/dev/null 2>&1 || true
 fi
 
+# Enable the update timer for the configured player user if one is lingering.
+if [ -f /etc/hifiberry.user ] && [ -d /run/systemd/system ]; then
+    HB_USER=$(tr -d '\n\r ' < /etc/hifiberry.user)
+    HB_UID=$(id -u "$HB_USER" 2>/dev/null || true)
+    if [ -n "$HB_UID" ] && [ -d "/run/user/$HB_UID" ]; then
+        su - "$HB_USER" -c 'systemctl --user daemon-reload && \
+            systemctl --user enable --now soloist-update.timer soloist-update.path' \
+            >/dev/null 2>&1 || true
+    fi
+fi
+
 exit 0

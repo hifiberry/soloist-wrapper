@@ -1,0 +1,6 @@
+[Unit]
+Description=Refresh the Spotify Soloist build before it expires
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/soloist-update

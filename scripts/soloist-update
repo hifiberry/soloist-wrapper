@@ -1,0 +1,83 @@
+#!/bin/bash
+# soloist-update — re-fetch Soloist before its build expires.
+#
+# Spotify's builds expire 90 days after their build date and then exit 10.
+# Refresh well before that so devices that are off, offline, or only powered
+# on occasionally still catch the refresh before the real deadline.
+#
+# soloist-fetch records how it learned build_date in build_date_source:
+#   "parsed"   — read straight from the binary's own --version output. A fact.
+#   "fallback" — the parser found no date in --version output and used the
+#                install date instead. A LOWER BOUND, not a fact: the real
+#                build could be considerably older, so the true expiry may
+#                arrive well before 90 days from the recorded date.
+# A "fallback" date is less information, not the same information, so it
+# gets a shorter, more conservative threshold than a "parsed" one. Anything
+# other than exactly "parsed" (missing field, unrecognised value, ...) is
+# treated the same conservative way, since it means we don't actually know
+# how the date was derived.
+set -u
+
+DATA_DIR="${HOME}/.local/share/soloist"
+VERSION_FILE="${DATA_DIR}/version.json"
+MAX_AGE_DAYS_PARSED=60
+MAX_AGE_DAYS_FALLBACK=30
+
+# The expiry flag is written by start-soloist when the daemon exits 10.
+if [ -f "${DATA_DIR}/expired" ]; then
+  echo "Expiry flag present, updating"
+  rm -f "${DATA_DIR}/expired"
+  exec /usr/bin/soloist-fetch
+fi
+
+if [ ! -f "$VERSION_FILE" ]; then
+  echo "No version file; nothing installed yet, not updating"
+  exit 0
+fi
+
+BUILD_INFO=$(python3 -c '
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    print(d.get("build_date", ""))
+    print(d.get("build_date_source", ""))
+except Exception:
+    pass
+' "$VERSION_FILE")
+
+BUILD_DATE=$(printf '%s\n' "$BUILD_INFO" | sed -n 1p)
+BUILD_DATE_SOURCE=$(printf '%s\n' "$BUILD_INFO" | sed -n 2p)
+
+if [ -z "$BUILD_DATE" ]; then
+  echo "Could not read build_date; updating to be safe"
+  exec /usr/bin/soloist-fetch
+fi
+
+BUILD_EPOCH=$(date -d "$BUILD_DATE" +%s 2>/dev/null) || BUILD_EPOCH=""
+if [ -z "$BUILD_EPOCH" ]; then
+  echo "Unparseable build_date '$BUILD_DATE'; updating to be safe"
+  exec /usr/bin/soloist-fetch
+fi
+
+if [ "$BUILD_DATE_SOURCE" = "parsed" ]; then
+  MAX_AGE_DAYS="$MAX_AGE_DAYS_PARSED"
+  echo "build_date_source is 'parsed' (read from the binary's --version output); using the ${MAX_AGE_DAYS}-day threshold"
+else
+  MAX_AGE_DAYS="$MAX_AGE_DAYS_FALLBACK"
+  if [ "$BUILD_DATE_SOURCE" = "fallback" ]; then
+    echo "build_date_source is 'fallback' (install date used as a lower bound, not a fact); using the more conservative ${MAX_AGE_DAYS}-day threshold"
+  else
+    echo "build_date_source is '${BUILD_DATE_SOURCE:-<unset>}' (unrecognised); treating it as unreliable and using the more conservative ${MAX_AGE_DAYS}-day threshold"
+  fi
+fi
+
+AGE_DAYS=$(( ( $(date +%s) - BUILD_EPOCH ) / 86400 ))
+echo "Installed build is ${AGE_DAYS} days old (build_date_source: ${BUILD_DATE_SOURCE:-<unset>})"
+
+if [ "$AGE_DAYS" -ge "$MAX_AGE_DAYS" ]; then
+  echo "Age ${AGE_DAYS} days >= ${MAX_AGE_DAYS}-day threshold; updating"
+  exec /usr/bin/soloist-fetch
+fi
+
+echo "Still fresh (${AGE_DAYS} days < ${MAX_AGE_DAYS}-day threshold), not updating"
+exit 0
