@@ -1,0 +1,217 @@
+#!/usr/bin/env python3
+"""soloist-bridge — connect Spotify Soloist's local WebSocket to audiocontrol.
+
+Soloist exposes a rich local WebSocket (events and commands) but no HTTP API,
+and audiocontrol's generic player speaks HTTP in both directions. This process
+is the adapter, and it is also where the WebUI's setup API lives.
+
+Runs as a systemd *user* service alongside soloist itself.
+
+Volume is deliberately NOT part of this bridge. Soloist attenuates in
+software (confirmed on hardware: `set_volume` moves Soloist's own gain but
+never touches the PipeWire sink), so two-way volume sync would double-
+attenuate. `start-soloist` pins Soloist to --initial-volume 100 once at
+login and the device volume is the single control from then on. This file
+must never send a `set_volume` command, and `translate()` must drop
+`volume_changed` events rather than forwarding them anywhere.
+"""
+import json
+import logging
+import os
+import pathlib
+import subprocess
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib import request as urlrequest
+from urllib.error import URLError
+
+LOG = logging.getLogger("soloist-bridge")
+
+DATA_DIR = pathlib.Path.home() / ".local/share/soloist"
+VERSION_FILE = DATA_DIR / "version.json"
+ACR_UPDATE_URL = "http://localhost:1080/api/player/soloist/update"
+COMMAND_PORT = 3549
+
+# Spotify's cover sizes, smallest to largest. Anything unrecognised sorts
+# lowest so a new size name never wins by accident. Confirmed against a real
+# capture (2026-08-19 spike): all four sizes are sent; large and xlarge can
+# carry the identical URL, so "pick the largest" is safe even though it is
+# not always a distinct image.
+COVER_SIZE_ORDER = ["small", "default", "large", "xlarge"]
+
+
+def _identity_name(entity):
+    """The display name inside an entity envelope, or None."""
+    if not isinstance(entity, dict):
+        return None
+    return (entity.get("decorations", {})
+                  .get("identity", {})
+                  .get("name"))
+
+
+def best_cover_url(decorations):
+    """The largest cover URL in a decorations block, or None."""
+    covers = decorations.get("visual_identity", {}).get("cover")
+    if not isinstance(covers, list) or not covers:
+        return None
+
+    def rank(cover):
+        size = cover.get("size")
+        return COVER_SIZE_ORDER.index(size) if size in COVER_SIZE_ORDER else -1
+
+    best = max(covers, key=rank)
+    return best.get("url")
+
+
+def song_from_item(item):
+    """Flatten Soloist's entity envelope into audiocontrol's song shape."""
+    if not isinstance(item, dict):
+        return None
+    decorations = item.get("decorations", {}) or {}
+
+    creators = decorations.get("creators") or []
+    names = [n for n in (_identity_name(c.get("entity")) for c in creators) if n]
+    # ACR's generic song carries a single artist string.
+    artist = ", ".join(names) if names else None
+
+    duration_ms = decorations.get("playback", {}).get("duration_ms")
+
+    return {
+        "title": decorations.get("identity", {}).get("name"),
+        "artist": artist,
+        "album": _identity_name(decorations.get("parent", {}).get("entity")),
+        "duration": duration_ms / 1000.0 if isinstance(duration_ms, (int, float)) else None,
+        "uri": item.get("uri"),
+        "cover_art_url": best_cover_url(decorations),
+    }
+
+
+def loop_mode_from_repeat(repeat):
+    """Soloist repeat state -> audiocontrol loop mode."""
+    return {"track": "track", "context": "playlist"}.get(repeat, "none")
+
+
+def _queue_entries(upcoming):
+    entries = []
+    for slot in upcoming or []:
+        item = slot.get("item") if isinstance(slot, dict) else None
+        song = song_from_item(item)
+        if not song or not song["title"]:
+            continue
+        entries.append({
+            "title": song["title"],
+            "artist": song["artist"],
+            "uri": song["uri"],
+        })
+    return entries
+
+
+def translate(event):
+    """One Soloist event -> zero or more audiocontrol generic events."""
+    kind = event.get("type")
+
+    if kind == "playback_state":
+        events = []
+        song = song_from_item(event.get("item"))
+        if song:
+            events.append({"type": "song_changed", "song": song})
+        if event.get("status"):
+            events.append({"type": "state_changed", "state": event["status"]})
+        position = event.get("position") or {}
+        if "position_ms" in position:
+            events.append({"type": "position_changed",
+                           "position": position["position_ms"] / 1000.0})
+        options = event.get("options") or {}
+        if "shuffle" in options:
+            events.append({"type": "shuffle_changed", "shuffle": bool(options["shuffle"])})
+        if "repeat" in options:
+            events.append({"type": "loop_mode_changed",
+                           "loop_mode": loop_mode_from_repeat(options["repeat"])})
+        # NOTE: "volume" is present on this payload too, but is deliberately
+        # not translated into anything -- see the module docstring. The
+        # device volume is the single control; Soloist's own gain is pinned
+        # once at login by start-soloist and never touched again.
+        return events
+
+    if kind == "track_changed":
+        song = song_from_item(event.get("item"))
+        return [{"type": "song_changed", "song": song}] if song else []
+
+    if kind == "playback_changed":
+        status = event.get("status")
+        return [{"type": "state_changed", "state": status}] if status else []
+
+    if kind == "position_sync":
+        position = event.get("position") or {}
+        if "position_ms" in position:
+            # ACR interpolates between updates, so forwarding each sync as-is
+            # is enough -- no 1 Hz ticking needed.
+            return [{"type": "position_changed",
+                     "position": position["position_ms"] / 1000.0}]
+        return []
+
+    if kind == "options_changed":
+        options = event.get("options") or {}
+        events = []
+        if "shuffle" in options:
+            events.append({"type": "shuffle_changed", "shuffle": bool(options["shuffle"])})
+        if "repeat" in options:
+            events.append({"type": "loop_mode_changed",
+                           "loop_mode": loop_mode_from_repeat(options["repeat"])})
+        return events
+
+    if kind == "queue_changed":
+        return [{"type": "queue_changed", "queue": _queue_entries(event.get("upcoming"))}]
+
+    # auth_state and device_changed feed /status, not audiocontrol.
+    # volume_changed is intentionally dropped -- see the module docstring:
+    # the bridge never syncs volume in either direction.
+    # context_changed carries no fields audiocontrol's generic song needs
+    # (title/artist/album/artwork all come from playback_state/track_changed).
+    # error is logged by the caller. Everything else is ignored on purpose.
+    return []
+
+
+def soloist_command(payload):
+    """An audiocontrol command_url body -> zero or more Soloist commands.
+
+    Never emits `set_volume` -- see the module docstring. audiocontrol's
+    soloist.json capability list has no "volume" entry, so ACR itself never
+    sends a volume command here, but the omission is deliberate on this side
+    too: this function has no case for it.
+    """
+    command = payload.get("command")
+
+    if command in ("play", "pause"):
+        return [{"type": "command", "command": command}]
+    if command == "next":
+        return [{"type": "command", "command": "skip_next"}]
+    if command == "previous":
+        return [{"type": "command", "command": "skip_prev"}]
+    if command == "stop":
+        # Soloist has no stop. Pause, then release the device.
+        return [{"type": "command", "command": "pause"},
+                {"type": "command", "command": "deactivate"}]
+    if command == "seek":
+        position = payload.get("position")
+        if not isinstance(position, (int, float)):
+            return []
+        return [{"type": "command", "command": "seek",
+                 "position_ms": int(position * 1000)}]
+    if command == "set_shuffle":
+        return [{"type": "command", "command": "set_shuffle",
+                 "enabled": bool(payload.get("shuffle"))}]
+    if command == "set_loop_mode":
+        # LoopMode's Display vocabulary: "no" | "song" | "playlist".
+        mode = payload.get("loop_mode")
+        if mode == "song":
+            return [{"type": "command", "command": "set_repeat_track", "enabled": True}]
+        if mode == "playlist":
+            return [{"type": "command", "command": "set_repeat_context", "enabled": True}]
+        return [{"type": "command", "command": "set_repeat_track", "enabled": False},
+                {"type": "command", "command": "set_repeat_context", "enabled": False}]
+
+    LOG.debug("Ignoring unknown command %r", command)
+    return []
+
