@@ -20,6 +20,7 @@ override_dh_auto_install:
 	cp -r data/* debian/hifiberry-soloist-wrapper/
 	install -D -m0755 scripts/soloist-fetch debian/hifiberry-soloist-wrapper/usr/bin/soloist-fetch
 	install -D -m0755 scripts/soloist-update debian/hifiberry-soloist-wrapper/usr/bin/soloist-update
+	install -D -m0755 scripts/start-soloist debian/hifiberry-soloist-wrapper/usr/bin/start-soloist
 
 # This package ships four *user* units and they must NOT all get the same
 # enable treatment (see usbaudio's debian/rules / README.md for the same
@@ -31,9 +32,9 @@ override_dh_auto_install:
 #    enabled would pull it into every boot transaction regardless of the
 #    WebUI toggle, and its Conflicts=librespot.service means that can cost a
 #    device its only working Spotify Connect endpoint (see the fix-round
-#    brief for the full failure chain) -- while it also has nothing to
-#    execute yet (Task 3, /usr/bin/start-soloist, is not implemented) so an
-#    enabled copy would just crash-loop.
+#    brief for the full failure chain). /usr/bin/start-soloist (Task 3) is
+#    implemented now, but the toggle-vs-Conflicts reasoning above still
+#    holds regardless, so this stays --no-enable.
 #  - soloist-update.timer and soloist-update.path stay enabled. They are the
 #    90-day expiry safety net for a player the user may not even have
 #    enabled yet, and both are no-ops when nothing is installed: the timer

@@ -1,0 +1,108 @@
+#!/bin/bash
+# start-soloist — launch Spotify Soloist from its systemd *user* service.
+#
+# The API key lives only in ConfigDB, encrypted. It is read here into a shell
+# variable and handed straight to the daemon; it is never written to disk by
+# us.
+#
+# PipeWire routing: deliberately no --pipewire-device. Measured on real
+# hardware (2026-08-19 spike): the default sink is already
+# speakereq2x2 (HiFiBerry's EQ chain) and Soloist's stream routes there
+# correctly on its own. Naming a node explicitly would risk pinning audio to
+# the raw ALSA device and bypassing the EQ, so the flag is omitted entirely.
+#
+# --initial-volume 100 is mandatory, not cosmetic. Soloist's own default is
+# 40 and it attenuates in SOFTWARE (confirmed on hardware: sending
+# set_volume 40 over the control websocket left the PipeWire sink volume at
+# 1.00, unchanged) -- so an unconfigured Soloist ships roughly 8 dB quieter
+# than the librespot it replaces, with nothing in the UI to explain why.
+# Soloist has no ALSA mixer options at all, so pinning it at 100 and letting
+# the device volume be the single control is the only workable arrangement;
+# do not remove this flag or "sync" it to anything.
+set -u
+
+DATA_DIR="${HOME}/.local/share/soloist"
+CACHE_DIR="${HOME}/.cache/soloist"
+BIN="${HOME}/.local/bin/soloist"
+CONFIG_SERVER="http://127.0.0.1:1081"
+
+# Run only as root or the configured HiFiBerry user (mirrors start-librespot).
+CURRENT_USER=$(whoami)
+if [ "$CURRENT_USER" != "root" ]; then
+  if [ -f /etc/hifiberry.user ]; then
+    AUTH_USER=$(tr -d '\n\r ' < /etc/hifiberry.user)
+    if [ "$CURRENT_USER" != "$AUTH_USER" ]; then
+      echo "Not starting soloist: must run as $AUTH_USER"
+      exit 0
+    fi
+  else
+    echo "Not starting soloist: /etc/hifiberry.user not found and not running as root"
+    exit 0
+  fi
+fi
+
+if ! /usr/bin/config-soundcard --detect >/dev/null 2>&1; then
+  echo "No sound card detected, not starting soloist"
+  exit 0
+fi
+
+# Exit 0, not non-zero: an unconfigured device must sit quietly rather than
+# restart-looping. The WebUI card is what tells the user what is missing.
+if [ ! -x "$BIN" ]; then
+  echo "Soloist is not installed yet (no $BIN). Run soloist-fetch."
+  exit 0
+fi
+
+API_KEY=$(curl --fail --silent --max-time 5 \
+  "${CONFIG_SERVER}/api/v1/key/player.soloist.api_key/secure" \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["value"])' 2>/dev/null)
+
+if [ -z "${API_KEY:-}" ]; then
+  echo "No Soloist API key configured. Enter one in the HiFiBerry web interface."
+  exit 0
+fi
+
+NAME=$(hostnamectl hostname --pretty 2>/dev/null)
+[ -n "$NAME" ] || NAME=$(hostname 2>/dev/null)
+[ -n "$NAME" ] || NAME="HiFiBerry"
+
+mkdir -p "$DATA_DIR" "$CACHE_DIR"
+
+# Builds expire 90 days after their build date and exit 10. Leave a flag the
+# soloist-update.path unit watches, so a device that was switched off for a
+# long time repairs itself instead of restart-looping. See soloist-update's
+# header comment for the full clear/don't-clear contract: only soloist-fetch
+# clears this flag, and only on a successful fetch.
+#
+# Only touch the flag the FIRST time it is observed missing. soloist.service
+# has Restart=on-failure with RestartSec=2, and systemd's PathExists=
+# re-triggers on IN_ATTRIB, not just create/delete -- so once the daemon is
+# stuck exiting 10 in a tight restart loop, a touch on every single restart
+# would re-fire soloist-update.path every ~2s and burn through its
+# TriggerLimitBurst=3/TriggerLimitIntervalSec=1h within seconds, parking the
+# path unit in a permanent failed state for the rest of the boot. Writing
+# the flag once is enough; it already being there on a later failed start is
+# not itself an error.
+cleanup_on_expiry() {
+  local status=$1
+  if [ "$status" -eq 10 ]; then
+    if [ ! -f "${DATA_DIR}/expired" ]; then
+      echo "Soloist build has expired; requesting an update"
+      touch "${DATA_DIR}/expired"
+    else
+      echo "Soloist build has expired (flag already set; not re-touching)"
+    fi
+  fi
+  exit "$status"
+}
+trap 'cleanup_on_expiry $?' EXIT
+
+echo "Starting Soloist as \"$NAME\""
+"$BIN" \
+  --device-name "$NAME" \
+  --api-key "$API_KEY" \
+  --data-dir "$DATA_DIR" \
+  --cache-dir "$CACHE_DIR" \
+  --cache-size 500 \
+  --initial-volume 100 \
+  --ws 127.0.0.1:0
