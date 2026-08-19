@@ -10,14 +10,31 @@ if [ -d /run/systemd/system ] && systemctl is-active --quiet config-server 2>/de
     systemctl restart config-server >/dev/null 2>&1 || true
 fi
 
-# Enable the update timer for the configured player user if one is lingering.
+# soloist-update.timer and soloist-update.path already ship enabled (see
+# debian/rules' override_dh_installsystemduser), so the /usr/lib/systemd/user
+# symlinks are in place as soon as this package is unpacked -- no
+# "systemctl --user enable" needed here, that would just duplicate what
+# debhelper already did. What is missing on a package installed onto an
+# already-running system is a live user manager that has re-read the new
+# unit files and actually started the timer/path unit; without this block
+# that only happens at the user's next login/boot. Best effort: no user
+# session yet (fresh image build, user never logged in) is not an error.
 if [ -f /etc/hifiberry.user ] && [ -d /run/systemd/system ]; then
-    HB_USER=$(tr -d '\n\r ' < /etc/hifiberry.user)
-    HB_UID=$(id -u "$HB_USER" 2>/dev/null || true)
-    if [ -n "$HB_UID" ] && [ -d "/run/user/$HB_UID" ]; then
-        su - "$HB_USER" -c 'systemctl --user daemon-reload && \
-            systemctl --user enable --now soloist-update.timer soloist-update.path' \
-            >/dev/null 2>&1 || true
+    HB_USER=$(grep -vE '^[[:space:]]*#|^[[:space:]]*$' /etc/hifiberry.user | head -1 | tr -d '[:space:]')
+    if [ -n "$HB_USER" ] && getent passwd "$HB_USER" >/dev/null 2>&1; then
+        HB_UID=$(id -u "$HB_USER" 2>/dev/null)
+        if [ -n "$HB_UID" ] && [ -d "/run/user/$HB_UID" ]; then
+            if ! systemd-run --uid "$HB_UID" --setenv XDG_RUNTIME_DIR="/run/user/$HB_UID" \
+                    --pipe --wait --quiet --collect \
+                    systemctl --user daemon-reload; then
+                echo "hifiberry-soloist-wrapper: could not reload the systemd --user instance for $HB_USER" >&2
+            fi
+            if ! systemd-run --uid "$HB_UID" --setenv XDG_RUNTIME_DIR="/run/user/$HB_UID" \
+                    --pipe --wait --quiet --collect \
+                    systemctl --user start soloist-update.timer soloist-update.path; then
+                echo "hifiberry-soloist-wrapper: could not start soloist-update.timer/soloist-update.path for $HB_USER; the 90-day expiry refresh will not be active until the next login or reboot" >&2
+            fi
+        fi
     fi
 fi
 

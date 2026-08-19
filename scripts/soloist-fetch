@@ -5,6 +5,25 @@
 # package; it is fetched from Spotify's CDN on the user's own device, on their
 # explicit request. Builds expire 90 days after their build date, so this also
 # runs periodically from soloist-update.timer.
+#
+# Exit code taxonomy -- this is a cross-component contract. The WebUI's
+# install-progress endpoint (and soloist-update) key off these to say
+# something more useful than "it failed", so propagate any change:
+#   0  success
+#   2  unsupported CPU architecture
+#   3  no network: curl could not even reach Spotify's CDN (DNS/connect
+#      failure -- curl exit 6 "could not resolve host" or 7 "could not
+#      connect")
+#   4  broken payload: the archive did not extract, contained no 'soloist'
+#      binary, or the binary failed its --version smoke test (wrong
+#      arch/non-executable)
+#   5  local environment failure: could not create/write to ~/.local/bin or
+#      ~/.local/share/soloist (disk full, permissions, stale lock, ...) --
+#      distinct from a broken payload because it says "your device", not
+#      "Spotify's build"
+#   6  download failure: curl reached Spotify's CDN but the request itself
+#      failed (HTTP error such as 404/5xx -- curl exit 22 under --fail -- or
+#      any other curl failure not classified above)
 set -u
 
 BASE_URL="https://soloist-builds.spotifycdn.com"
@@ -19,16 +38,52 @@ case "$(uname -m)" in
   *) echo "Unsupported architecture: $(uname -m)" >&2; exit 2 ;;
 esac
 
+mkdir -p "$BIN_DIR" "$DATA_DIR" || {
+  echo "Could not create ${BIN_DIR} or ${DATA_DIR}" >&2
+  exit 5
+}
+
+# Serialise concurrent fetch attempts against this data dir: soloist-update
+# (the daily timer, or the expiry path unit) and a WebUI "Update now" action
+# can both invoke this script with nothing else stopping them from running
+# at the same time. A blocking flock makes the second caller simply wait
+# its turn rather than racing the first through install/rename below.
+LOCK_FILE="${DATA_DIR}/.fetch.lock"
+exec 9>"$LOCK_FILE" || {
+  echo "Could not open lock file ${LOCK_FILE}" >&2
+  exit 5
+}
+flock 9
+
+# Unique per-process staging name: two serialised-but-sequential runs (or a
+# stray leftover from a killed previous run) must never collide on, or be
+# mistaken for, each other's in-progress download.
+STAGING="${BIN_DIR}/soloist.new.$$"
+
 TMPDIR_LOCAL=$(mktemp -d)
-trap 'rm -rf "$TMPDIR_LOCAL"' EXIT
+trap 'rm -rf "$TMPDIR_LOCAL"; rm -f "$STAGING"' EXIT
 
 echo "Downloading Soloist for ${ARCH}..."
-if ! curl --fail --location --proto '=https' --tlsv1.2 --silent --show-error \
+curl --fail --location --proto '=https' --tlsv1.2 --silent --show-error \
         --max-time 300 \
         -o "${TMPDIR_LOCAL}/soloist.tar.gz" \
-        "${BASE_URL}/soloist_release_${ARCH}.tar.gz"; then
-  echo "Download failed" >&2
-  exit 3
+        "${BASE_URL}/soloist_release_${ARCH}.tar.gz"
+CURL_STATUS=$?
+if [ "$CURL_STATUS" -ne 0 ]; then
+  case "$CURL_STATUS" in
+    6|7)
+      echo "Could not reach Spotify's CDN (curl exit ${CURL_STATUS}: DNS/connect failure)" >&2
+      exit 3
+      ;;
+    22)
+      echo "Spotify's CDN returned an HTTP error (curl exit ${CURL_STATUS})" >&2
+      exit 6
+      ;;
+    *)
+      echo "Download failed (curl exit ${CURL_STATUS})" >&2
+      exit 6
+      ;;
+  esac
 fi
 
 if ! tar -xzf "${TMPDIR_LOCAL}/soloist.tar.gz" -C "${TMPDIR_LOCAL}"; then
@@ -50,17 +105,13 @@ if ! VERSION_OUTPUT=$("$CANDIDATE" --version 2>&1); then
   exit 4
 fi
 
-mkdir -p "$BIN_DIR" "$DATA_DIR" || {
-  echo "Could not create ${BIN_DIR} or ${DATA_DIR}" >&2
-  exit 4
-}
-if ! install -m 755 "$CANDIDATE" "${BIN_DIR}/soloist.new"; then
-  echo "Could not install binary to ${BIN_DIR}/soloist.new" >&2
-  exit 4
+if ! install -m 755 "$CANDIDATE" "$STAGING"; then
+  echo "Could not install binary to ${STAGING}" >&2
+  exit 5
 fi
-if ! mv -f "${BIN_DIR}/soloist.new" "${BIN_DIR}/soloist"; then
-  echo "Could not move ${BIN_DIR}/soloist.new into place at ${BIN_DIR}/soloist" >&2
-  exit 4
+if ! mv -f "$STAGING" "${BIN_DIR}/soloist"; then
+  echo "Could not move ${STAGING} into place at ${BIN_DIR}/soloist" >&2
+  exit 5
 fi
 
 # --version prints version, build timestamp, build identifiers, platform and
@@ -101,6 +152,11 @@ cat > "$VERSION_FILE" <<EOF
 EOF
 
 echo "Installed ${BIN_DIR}/soloist (${VERSION}, built ${BUILD_DATE})"
+
+# Clear the expiry flag now that a fresh build is in place. This is
+# deliberately done here, on SUCCESS, and not by soloist-update before it
+# attempts a refresh -- see soloist-update's header comment for why.
+rm -f "${DATA_DIR}/expired"
 
 # Restart the daemon if it was already running, so the new build takes over.
 if systemctl --user is-active --quiet soloist 2>/dev/null; then

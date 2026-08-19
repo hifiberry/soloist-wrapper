@@ -9,7 +9,14 @@ Conflicts=librespot.service
 Type=simple
 ExecStart=/usr/bin/start-soloist
 Restart=on-failure
-RestartSec=10
+# RestartSec must be well under the default StartLimitIntervalSec (10s) for
+# the default StartLimitBurst (5) to ever trip: at RestartSec=10 each retry
+# lands right at the edge of a fresh interval window, so the burst counter
+# never accumulates and a persistently failing start (e.g. a missing
+# /usr/bin/start-soloist) restarts every 10s forever, filling the journal.
+# RestartSec=2 (matching sendspin.service) fits five retries inside one
+# 10s window, so the default burst limit actually stops the unit instead.
+RestartSec=2
 
 [Install]
 WantedBy=default.target

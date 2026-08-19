@@ -16,23 +16,55 @@
 # other than exactly "parsed" (missing field, unrecognised value, ...) is
 # treated the same conservative way, since it means we don't actually know
 # how the date was derived.
+#
+# The expiry flag ($DATA_DIR/expired) is written by start-soloist when the
+# daemon exits 10 (build expired). It is a SIGNAL that a refresh is needed,
+# and this script is not allowed to clear it before it has actually been
+# acted on: the commonest reason a build reaches expiry is that the device
+# was off or offline, which is exactly when the ensuing fetch also fails. If
+# soloist-update deleted the flag up front and the fetch then failed, the
+# flag would be gone and soloist-update.path would never fire again. So only
+# soloist-fetch clears it, and only once a fetch actually SUCCEEDS.
+# start-soloist does not need to keep rewriting the flag on every failed
+# restart -- writing it once, the first time it observes exit 10, is enough;
+# the flag already existing on a later failed start is not itself an error,
+# and soloist-fetch's success path is the only thing that removes it.
+# soloist-update.path guards against the hot-loop this would otherwise cause
+# (a failed fetch leaves the flag in place, and PathExists= re-triggers as
+# soon as the oneshot exits) with TriggerLimitIntervalSec/TriggerLimitBurst,
+# so a persistently failing fetch retries at a bounded rate instead of in a
+# tight loop; the daily timer remains the long-term backstop.
 set -u
 
+BIN_DIR="${HOME}/.local/bin"
+SOLOIST_BIN="${BIN_DIR}/soloist"
 DATA_DIR="${HOME}/.local/share/soloist"
 VERSION_FILE="${DATA_DIR}/version.json"
 MAX_AGE_DAYS_PARSED=60
 MAX_AGE_DAYS_FALLBACK=30
 
-# The expiry flag is written by start-soloist when the daemon exits 10.
+# The binary is the source of truth for "is anything installed", not
+# version.json: soloist-fetch installs the binary before it writes
+# version.json, so an interrupted fetch (power loss, SIGKILL, a cancelled
+# background install job) or anything else that clears Soloist's own
+# ~/.local/share/soloist data directory can leave binary-present/no-
+# version.json. Treating that as "nothing installed yet" would mean the
+# build silently sails past 90 days with no updater ever running again.
+if [ ! -x "$SOLOIST_BIN" ]; then
+  echo "No soloist binary at ${SOLOIST_BIN}; nothing installed yet, not updating"
+  exit 0
+fi
+
+# The expiry flag is written by start-soloist when the daemon exits 10 (see
+# the header comment above for the full clear/don't-clear contract).
 if [ -f "${DATA_DIR}/expired" ]; then
   echo "Expiry flag present, updating"
-  rm -f "${DATA_DIR}/expired"
   exec /usr/bin/soloist-fetch
 fi
 
 if [ ! -f "$VERSION_FILE" ]; then
-  echo "No version file; nothing installed yet, not updating"
-  exit 0
+  echo "Binary present but no version.json (interrupted install, or the data dir was cleared); updating to be safe"
+  exec /usr/bin/soloist-fetch
 fi
 
 BUILD_INFO=$(python3 -c '

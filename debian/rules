@@ -7,9 +7,43 @@ export DEB_BUILD_MAINT_OPTIONS = hardening=+all
 override_dh_auto_build:
 
 override_dh_auto_test:
+	# Both suites are self-contained: soloist-fetch's CDN and soloist-update's
+	# soloist-fetch are always faked (sed-substituted copies pointed at a
+	# loopback HTTP server or a local mock script), so they touch no real
+	# network and are safe to run on every build. A suite nothing executes
+	# rots, so wire both in rather than leaving this target empty.
+	tests/test_soloist_fetch.sh
+	tests/test_soloist_update.sh
 
 override_dh_auto_install:
 	mkdir -p debian/hifiberry-soloist-wrapper
 	cp -r data/* debian/hifiberry-soloist-wrapper/
 	install -D -m0755 scripts/soloist-fetch debian/hifiberry-soloist-wrapper/usr/bin/soloist-fetch
 	install -D -m0755 scripts/soloist-update debian/hifiberry-soloist-wrapper/usr/bin/soloist-update
+
+# This package ships four *user* units and they must NOT all get the same
+# enable treatment (see usbaudio's debian/rules / README.md for the same
+# idiom applied to a WebUI-toggleable player alongside always-on units):
+#
+#  - soloist.service is the WebUI-toggleable player, like every other
+#    HiFiBerryOS player (sendspin, librespot, shairport, ...): it ships
+#    disabled and the user turns it on from Services > Players. Shipping it
+#    enabled would pull it into every boot transaction regardless of the
+#    WebUI toggle, and its Conflicts=librespot.service means that can cost a
+#    device its only working Spotify Connect endpoint (see the fix-round
+#    brief for the full failure chain) -- while it also has nothing to
+#    execute yet (Task 3, /usr/bin/start-soloist, is not implemented) so an
+#    enabled copy would just crash-loop.
+#  - soloist-update.timer and soloist-update.path stay enabled. They are the
+#    90-day expiry safety net for a player the user may not even have
+#    enabled yet, and both are no-ops when nothing is installed: the timer
+#    only spawns soloist-update, which exits 0 with nothing to refresh if
+#    there is no version.json (see scripts/soloist-update), and the path
+#    unit only fires on an expiry flag that only start-soloist ever writes.
+#  - soloist-update.service is left off this list deliberately: it carries
+#    no [Install] section (it is only ever pulled in as a Unit= target by
+#    the path unit or invoked directly), so dh_installsystemduser has
+#    nothing to enable for it either way.
+override_dh_installsystemduser:
+	dh_installsystemduser soloist-update.path soloist-update.timer
+	dh_installsystemduser --no-enable soloist.service

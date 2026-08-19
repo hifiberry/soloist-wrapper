@@ -4,6 +4,15 @@ Description=React to an expired Spotify Soloist build
 [Path]
 PathExists=%h/.local/share/soloist/expired
 Unit=soloist-update.service
+# soloist-fetch only clears the flag on a SUCCESSFUL refresh (see
+# soloist-update's header comment for why soloist-update itself must not).
+# That means a failed refresh leaves the flag in place, and PathExists=
+# re-evaluates as soon as the triggered oneshot exits -- without a limit
+# this becomes a tight retry loop. Bound it instead: at most one trigger an
+# hour. The daily timer remains the long-term backstop for a device that
+# stays offline past an hour.
+TriggerLimitIntervalSec=1h
+TriggerLimitBurst=1
 
 [Install]
 WantedBy=default.target
