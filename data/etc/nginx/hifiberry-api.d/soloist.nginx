@@ -7,8 +7,24 @@
 # audiocontrol's private transport channel (play/pause/seek/...) and must
 # never be reachable from a browser. A prefix location here (`location
 # /api/soloist/`) would publish /api/soloist/command as a side effect; exact
-# match means only /status and /install exist as far as nginx is concerned,
-# and everything else -- including /command -- 404s.
+# match means only /status and /install exist as far as nginx is concerned.
+#
+# /command is NOT proxied anywhere by this file, and that -- not any
+# particular status code -- is what keeps it unreachable. With no location
+# block for it, the request falls through to the WebUI's SPA catch-all
+# (`location /`), which is static/history-mode serving: it answers
+# GET /api/soloist/command with the app's index.html (200) and
+# POST /api/soloist/command with nginx's own static-module rejection (405).
+# It does NOT 404 -- confirmed on a real device (Task 7's integration pass).
+# That is fine: safety here rests on two independent layers, neither of
+# which is the status code -- (1) no proxy_pass exists for /command, so
+# there is nothing on the other end of this route regardless of what nginx
+# answers, and (2) /etc/hifiberry/auth.d/soloist-auth.json's default_tier is
+# "risky" for anything under /api/soloist not explicitly listed as "ok", so
+# even if a location were later added here by mistake, an unauthenticated
+# caller would still be gated. Do not "fix" this by adding a
+# `location = /api/soloist/command { return 404; }` -- that would be new
+# routing for a path that must simply never route anywhere.
 #
 # Tiering (see /etc/hifiberry/auth.d/soloist-auth.json):
 #   - /status is ok-tier: it returns binary version/build/expiry/daemon

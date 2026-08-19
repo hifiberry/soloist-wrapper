@@ -36,3 +36,22 @@ Spotify Premium account is required.
   section for why forwarding was considered and rejected (Spotify's app
   slider is quantised to 16 steps, coarser than ACR's own range, and
   correct forwarding would need a reset-to-100 echo-suppression loop).
+- **`/api/soloist/command` does not 404.** No nginx location proxies it, so an
+  unmatched request falls through to the WebUI SPA's catch-all: `GET` answers
+  200 with the app's `index.html`, `POST` answers 405. It never reaches
+  audiocontrol's private transport channel regardless -- there is no
+  `proxy_pass` for it at all, and `/etc/hifiberry/auth.d/soloist-auth.json`'s
+  `default_tier` independently classifies anything under `/api/soloist` not
+  explicitly listed as `ok` as `risky`. Safety here does not rest on the
+  status code being 404; confirmed on a real device (Task 7).
+- **`apt remove` does not remove the player from the WebUI.** debhelper
+  registers every file this package installs under `/etc/` as a conffile, so
+  a plain `apt remove hifiberry-soloist-wrapper` leaves the ACR, WebUI,
+  auth-tier and config-server descriptors in place and the Soloist card
+  keeps showing in the WebUI. `apt purge` removes them. This is standard
+  Debian/debhelper conffile semantics, applied the same way across this
+  project, not a bug specific to this package -- it is intentionally left
+  as-is rather than special-cased. Either way, the downloaded Soloist binary
+  and the paired Spotify session under `$HOME` survive, which *is*
+  intended: reinstalling (after `remove` or `purge`) must not force
+  re-pairing.
