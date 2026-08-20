@@ -1,0 +1,2 @@
+rm_conffile /etc/hifiberry/players.d/soloist.json 0.1.8
+rm_conffile /etc/hifiberry/players.d/icons/soloist.svg 0.1.8
