@@ -660,12 +660,19 @@ class BridgeHandler(BaseHTTPRequestHandler):
 def _handle_sigterm(signum, frame):
     """Tell audiocontrol the player is gone before this process dies.
 
-    systemd's PartOf=soloist.service sends SIGTERM here whenever
-    soloist.service stops, including via the WebUI toggle. Python's
-    default SIGTERM action terminates the process immediately with no
-    cleanup, so without this handler audiocontrol keeps showing whatever
-    state it last heard (typically "playing") forever afterwards -- there
-    is nothing left running that could ever correct it (Important C).
+    SIGTERM arrives when THIS unit stops -- `systemctl --user stop
+    soloist-bridge`, a package upgrade, shutdown. It deliberately does
+    NOT arrive when soloist.service stops (e.g. the WebUI toggle):
+    soloist-bridge.service has no PartOf=soloist.service, and must not
+    (see that unit's [Unit] comment for why). That case is covered
+    instead by _run_loop's finally: block, which posts the same
+    disconnected event whenever the WebSocket drops.
+
+    Python's default SIGTERM action terminates the process immediately
+    with no cleanup, so without this handler audiocontrol keeps showing
+    whatever state it last heard (typically "playing") forever
+    afterwards -- there is nothing left running that could ever correct
+    it (Important C).
     """
     LOG.info("Received SIGTERM, telling audiocontrol the player is gone")
     try:
