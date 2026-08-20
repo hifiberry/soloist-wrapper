@@ -1,3 +1,13 @@
+hifiberry-soloist-wrapper (0.1.5) trixie; urgency=medium
+
+  * Player icon: use the Spotify mark. The shipped soloist.svg drew a
+    letter "B" inside a circle -- a placeholder that never got replaced --
+    so the Players page showed a circled B for a Spotify Connect player.
+    The extension card looked right only because it draws from a different
+    source (XB-Extension-Icon-Url), which already pointed at spotify.svg.
+
+ -- HiFiBerry <support@hifiberry.com>  Thu, 20 Aug 2026 14:30:00 +0000
+
 hifiberry-soloist-wrapper (0.1.4) trixie; urgency=medium
 
   * Player descriptor: mark the maintainer as Wanted, so the card reads
