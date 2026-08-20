@@ -1,3 +1,12 @@
+hifiberry-soloist-wrapper (0.1.6) trixie; urgency=medium
+
+  * Descriptor: declare setup.base_url = /api/soloist. The web interface
+    drives the binary download from this rather than recognising the
+    player by name. Needs hifiberry-configurator 2.17.3, which passes the
+    field through, and hifiberry-webui 0.23.0, which reads it.
+
+ -- HiFiBerry <support@hifiberry.com>  Thu, 20 Aug 2026 16:30:00 +0000
+
 hifiberry-soloist-wrapper (0.1.5) trixie; urgency=medium
 
   * Player icon: use the Spotify mark. The shipped soloist.svg drew a

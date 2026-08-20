@@ -7,6 +7,9 @@
     "conflicts_with": [
         "librespot"
     ],
+    "setup": {
+        "base_url": "/api/soloist"
+    },
     "maintainer_name": "Wanted",
     "maintainer_url": "https://github.com/hifiberry/hifiberry-os/blob/hbosng/docs/maintainers-wanted.md",
     "settings": [

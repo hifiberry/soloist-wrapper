@@ -22,7 +22,7 @@ XB-Extension-Needs-Reboot: no
 XB-Extension-Icon-Url: /images/svg/spotify.svg
 Depends: ${misc:Depends},
  python3, python3-websocket, curl, ca-certificates,
- hifiberry-configurator (>= 2.17.1), hifiberry-audiocontrol (>= 0.9.0)
+ hifiberry-configurator (>= 2.17.3), hifiberry-audiocontrol (>= 0.9.0)
 Description: Spotify Soloist player for HiFiBerryOS
  Runs Spotify Soloist as a Spotify Connect endpoint and bridges its local
  WebSocket API to audiocontrol, providing metadata, artwork, queue and
