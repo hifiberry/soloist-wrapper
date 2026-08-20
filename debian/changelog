@@ -1,3 +1,19 @@
+hifiberry-soloist-wrapper (0.1.1) trixie; urgency=medium
+
+  * Declare the extension metadata the WebUI catalog reads. 0.1.0 shipped
+    only XB-Hifiberry-Extension, so the card fell back to every default:
+    it showed the raw package name "hifiberry-soloist-wrapper" and was
+    filed under "Tools" rather than "Players".
+    - XB-Extension-Name: Spotify Soloist
+    - XB-Extension-Category: player
+    - XB-Extension-Needs-Reboot: no
+    - XB-Extension-Icon-Url pointing at the spotify.svg that
+      hifiberry-webui already ships, so it resolves without internet
+  * Correct the SIGTERM handler's docstring, which described a
+    PartOf=soloist.service that the bridge unit deliberately does not have.
+
+ -- HiFiBerry <support@hifiberry.com>  Thu, 20 Aug 2026 07:00:00 +0000
+
 hifiberry-soloist-wrapper (0.1.0) trixie; urgency=medium
 
   * Initial release: registers Spotify Soloist as an external Spotify
