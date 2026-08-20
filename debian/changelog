@@ -1,3 +1,16 @@
+hifiberry-soloist-wrapper (0.1.3) trixie; urgency=medium
+
+  * Declare conflicts_with: ["librespot"] in the player descriptor. Only one
+    Spotify Connect endpoint may advertise at a time; soloist.service has
+    carried Conflicts=librespot.service from the start, but that only stops
+    the two running simultaneously. Nothing stopped both being *enabled*, so
+    both started at boot and whichever won the race stopped the other,
+    giving a different Spotify player on different boots.
+  * Requires hifiberry-configurator 2.17.1, which passes the new field
+    through /api/v1/players.
+
+ -- HiFiBerry <support@hifiberry.com>  Thu, 20 Aug 2026 09:30:00 +0000
+
 hifiberry-soloist-wrapper (0.1.2) trixie; urgency=medium
 
   * Do not restart config-server from the postinst. When the WebUI installs

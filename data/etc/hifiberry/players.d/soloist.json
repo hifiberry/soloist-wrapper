@@ -4,6 +4,7 @@
     "systemd_service": "soloist",
     "icon": "soloist",
     "allow_change": true,
+    "conflicts_with": ["librespot"],
     "maintainer_name": "HiFiBerry",
     "maintainer_url": "https://www.hifiberry.com",
     "settings": [
