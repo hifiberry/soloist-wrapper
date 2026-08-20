@@ -2,13 +2,31 @@
 set -e
 #DEBHELPER#
 
-# config-server caches the conf.d systemd-permission drop-ins at startup, so a
-# package installed onto a running system is invisible to it until it re-reads
-# conf.d -- the WebUI would 401/404 on every attempt to start the player. No-op
-# during image builds, where config-server is not running yet.
-if [ -d /run/systemd/system ] && systemctl is-active --quiet config-server 2>/dev/null; then
-    systemctl restart config-server >/dev/null 2>&1 || true
-fi
+# NOTE: do NOT restart config-server here.
+#
+# config-server caches the conf.d systemd-permission drop-ins at startup, and
+# an earlier version of this script restarted it so a package installed onto a
+# running system would be seen. That restart killed the install it was part of:
+# when the WebUI installs an extension, config-server is the process running
+# apt, and it holds the job the UI polls in memory (JobRegistry._jobs is a
+# plain dict). Restarting from the postinst -- which runs during dpkg's
+# configure step, mid-install -- destroyed the job registry and the thread that
+# would have marked the job done. apt itself survived, because the runner
+# starts it under `systemd-run`, so the package installed correctly while the
+# UI polled a job id that no longer existed and sat on "Configuring..." for
+# ever.
+#
+# It is also unnecessary. configurator reloads conf.d in place after every
+# extension install: runner._run_and_finish() calls refresh_system_state(),
+# whose config_reloader() -> reload_config() -> load_config() re-merges
+# conf.d/*.json (see configurator/extensions/postinstall.py, whose docstring
+# says exactly this: "Restarting is not an option here: it would kill the job
+# the UI is polling. So we reload in place instead").
+#
+# Caveat for a manual `apt install` from a shell: nothing calls
+# refresh_system_state() on that path, so config-server keeps its cached
+# conf.d until it is restarted by hand. Installing through the WebUI, which is
+# the supported path for an extension, needs nothing.
 
 # Pick up the new /etc/nginx/hifiberry-api.d/soloist.nginx drop-in. Without
 # this, a package installed onto a running system leaves both

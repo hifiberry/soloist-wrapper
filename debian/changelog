@@ -1,3 +1,17 @@
+hifiberry-soloist-wrapper (0.1.2) trixie; urgency=medium
+
+  * Do not restart config-server from the postinst. When the WebUI installs
+    an extension, config-server is the process running apt and it holds the
+    job the UI polls in memory; restarting from the postinst -- which runs
+    during dpkg's configure step, part-way through the install -- destroyed
+    that job. apt survived (the runner starts it under systemd-run) so the
+    package installed correctly, but the UI polled an id that no longer
+    existed and sat on "Configuring" indefinitely.
+    The restart was also unnecessary: configurator already reloads conf.d in
+    place after every extension install, via refresh_system_state().
+
+ -- HiFiBerry <support@hifiberry.com>  Thu, 20 Aug 2026 09:00:00 +0000
+
 hifiberry-soloist-wrapper (0.1.1) trixie; urgency=medium
 
   * Declare the extension metadata the WebUI catalog reads. 0.1.0 shipped
