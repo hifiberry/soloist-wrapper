@@ -4,9 +4,11 @@
     "systemd_service": "soloist",
     "icon": "soloist",
     "allow_change": true,
-    "conflicts_with": ["librespot"],
-    "maintainer_name": "HiFiBerry",
-    "maintainer_url": "https://www.hifiberry.com",
+    "conflicts_with": [
+        "librespot"
+    ],
+    "maintainer_name": "Wanted",
+    "maintainer_url": "https://github.com/hifiberry/hifiberry-os/blob/hbosng/docs/maintainers-wanted.md",
     "settings": [
         {
             "key": "api_key",
