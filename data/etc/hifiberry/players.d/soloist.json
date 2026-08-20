@@ -17,7 +17,9 @@
             "key": "api_key",
             "type": "secret",
             "label": "Soloist API key",
-            "default": ""
+            "default": "",
+            "description": "Each user needs their own Soloist API key. A Spotify Premium account is required.",
+            "help_url": "https://developer.spotify.com/documentation/soloist"
         }
     ]
 }

@@ -1,3 +1,11 @@
+hifiberry-soloist-wrapper (0.1.7) trixie; urgency=medium
+
+  * Descriptor: describe the API key setting and link to Spotify's Soloist
+    documentation, so the field says what it wants and where to get it
+    rather than only "Paste your key". Needs hifiberry-configurator 2.17.4.
+
+ -- HiFiBerry <support@hifiberry.com>  Thu, 20 Aug 2026 17:30:00 +0000
+
 hifiberry-soloist-wrapper (0.1.6) trixie; urgency=medium
 
   * Descriptor: declare setup.base_url = /api/soloist. The web interface
