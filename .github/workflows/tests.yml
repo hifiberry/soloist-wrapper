@@ -1,0 +1,35 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # There is no requirements.txt / pyproject dependency list here. The
+      # Debian control file's Depends line names python3-websocket (the
+      # Debian package for websocket-client, module `websocket`), but
+      # scripts/soloist-bridge only imports it lazily inside the function
+      # that opens the live Soloist connection -- it is never imported at
+      # module load or exercised by tests/test_soloist_bridge.py, which
+      # loads the script by exec()'ing its source and calls only its pure
+      # translation functions. So the only thing the suite actually needs
+      # is pytest itself; everything soloist-bridge imports at module scope
+      # (json, logging, http.server, urllib, ...) is stdlib.
+      #
+      # tests/test_soloist_fetch.sh and tests/test_soloist_update.sh are
+      # shell scripts, not pytest tests, and are not collected here.
+      - name: Install dependencies
+        run: pip install pytest
+
+      - name: Run tests
+        run: python -m pytest tests/ -v
