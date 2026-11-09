@@ -63,6 +63,14 @@ if [ -f /etc/hifiberry.user ] && [ -d /run/systemd/system ]; then
                     systemctl --user daemon-reload; then
                 echo "hifiberry-soloist-wrapper: could not reload the systemd --user instance for $HB_USER" >&2
             fi
+            # "start" does nothing for a unit that is already running, so on
+            # an upgrade the bridge and the player kept the old code until the
+            # next reboot or login. try-restart replaces what is running and
+            # leaves alone what is not -- a player switched off in the WebUI
+            # stays off.
+            systemd-run --uid "$HB_UID" --setenv XDG_RUNTIME_DIR="/run/user/$HB_UID" \
+                    --pipe --wait --quiet --collect \
+                    systemctl --user try-restart soloist-bridge.service soloist.service >/dev/null 2>&1 || true
             if ! systemd-run --uid "$HB_UID" --setenv XDG_RUNTIME_DIR="/run/user/$HB_UID" \
                     --pipe --wait --quiet --collect \
                     systemctl --user start soloist-update.timer soloist-update.path soloist-bridge.service; then
